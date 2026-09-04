@@ -1,4 +1,4 @@
-"""GET /api/widget — the pre-drawn feed (docs/design.md D14, api.md round 5).
+"""GET /api/widget — the pre-drawn feed (docs/design.md D14, api.md round 5/6).
 
 Everything the widget used to work out in Swift is asserted here instead: which
 tasks appear, in what order, and what the due label says. The extension keeps
@@ -6,6 +6,7 @@ one job, which is drawing them.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -30,6 +31,14 @@ async def feed(client) -> dict:
     return r.json()
 
 
+async def put_prefs(client, **sections) -> dict:
+    """PUT replaces the WHOLE document, so every section a test needs together
+    has to travel in one call — `categories` and `widget` especially."""
+    r = await client.put("/api/prefs", json=sections)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 # --------------------------------------------------------------------------- #
 # Shape
 # --------------------------------------------------------------------------- #
@@ -37,9 +46,12 @@ async def test_shape_and_caps(client):
     await make(client, "due now", due=day(-1))
     body = await feed(client)
 
-    assert set(body) == {"updated", "total", "caps", "rows"}
+    assert set(body) == {"updated", "total", "group_by", "caps", "rows"}
     assert body["updated"].endswith(("-05:00", "-06:00"))
     assert body["total"] == 1
+    # Round 6: echoed so the widget knows whether to draw category headers,
+    # without a second request for the prefs document.
+    assert body["group_by"] == "due"
     # `caps`, NOT `rows` — `rows` is the array. The widget truncates to
     # caps.small / caps.medium for the smaller families.
     assert body["caps"] == {"small": 3, "medium": 5, "large": 12}
@@ -187,6 +199,136 @@ async def test_recurring_templates_never_reach_the_widget(client):
     rows = (await feed(client))["rows"]
     assert [r["text"] for r in rows] == ["gym"]          # the instance, once
     assert rows[0]["uuid"] != t["uuid"]
+
+
+# --------------------------------------------------------------------------- #
+# group_by — "due" (round 5) or "category" (round 6)
+# --------------------------------------------------------------------------- #
+async def test_due_mode_is_byte_for_byte_what_round_5_sent(client):
+    """The whole of round 6 on a "due" feed is the one new `group_by` key.
+
+    Pinned as JSON TEXT and not as a dict: a reordered key, a stray field, or a
+    `category` that has quietly started filling itself in has to fail here, in
+    the server's own suite, rather than on a home screen after a store build.
+    """
+    late = await make(client, "work thing", project="work", due=day(-1))
+    clocked = await make(client, "loose", due="%sT23:58" % day(0))
+    plain = await make(client, "home thing", project="personal", due=day(0))
+
+    body = await feed(client)
+    assert body.pop("group_by") == "due"
+    assert body.pop("updated")                    # the server's clock; it moves
+    assert json.dumps(body) == json.dumps({
+        "total": 3,
+        "caps": {"small": 3, "medium": 5, "large": 12},
+        "rows": [
+            {"uuid": late["uuid"], "text": "work thing", "due": "overdue",
+             "overdue": True, "group": "overdue", "category": ""},
+            {"uuid": clocked["uuid"], "text": "loose", "due": "11:58 pm",
+             "overdue": False, "group": "today", "category": ""},
+            # `category` is "" although both tasks HAVE one: show_category is
+            # off, and that round-5 rule stands in "due" mode.
+            {"uuid": plain["uuid"], "text": "home thing", "due": "today",
+             "overdue": False, "group": "today", "category": ""},
+        ],
+    })
+
+
+async def test_category_mode_follows_the_prefs_category_order(client):
+    await make(client, "w", project="work", due=day(-1))
+    await make(client, "p", project="personal", due=day(-1))
+    await make(client, "c", project="claude", due=day(-1))
+
+    await put_prefs(client, categories={"order": ["work", "claude", "personal"]},
+                    widget={"group_by": "category"})
+    body = await feed(client)
+    assert body["group_by"] == "category"
+    assert [r["text"] for r in body["rows"]] == ["w", "c", "p"]
+    assert [r["category"] for r in body["rows"]] == ["work", "claude",
+                                                     "personal"]
+
+
+async def test_the_runs_are_prefs_order_then_alphabetical_then_no_category(client):
+    for project in ("zeta", "alpha", "Beta", "work", "personal"):
+        await make(client, project, project=project, due=day(-1))
+    await make(client, "loose", due=day(-1))
+
+    await put_prefs(client, categories={"order": ["work", "personal"]},
+                    widget={"group_by": "category"})
+    assert [r["category"] for r in (await feed(client))["rows"]] == [
+        "work", "personal",        # the arranged ones, in the user's order
+        "alpha", "Beta", "zeta",   # then the rest — alphabetical, case folded
+        "",                        # then the uncategorised, under an empty name
+    ]
+
+
+async def test_within_a_category_the_normal_display_order_stands(client):
+    """And the category run wins over the due grouping: an OVERDUE task in the
+    second category still comes after a merely-today one in the first."""
+    await make(client, "work today", project="work", due=day(0))
+    await make(client, "work late", project="work", due=day(-1))
+    await make(client, "personal late", project="personal", due=day(-1))
+
+    await put_prefs(client, categories={"order": ["work", "personal"]},
+                    widget={"group_by": "category"})
+    assert [r["text"] for r in (await feed(client))["rows"]] == [
+        "work late", "work today", "personal late"]
+
+
+async def test_the_sort_mode_still_orders_inside_a_category(client):
+    await make(client, "early", project="work", due="%sT23:57" % day(0))
+    await make(client, "late high", project="work", priority="H",
+               due="%sT23:58" % day(0))
+    await make(client, "elsewhere", project="personal", due=day(-1))
+
+    await put_prefs(client, categories={"order": ["work", "personal"]},
+                    sort={"mode": "priority"}, widget={"group_by": "category"})
+    assert [r["text"] for r in (await feed(client))["rows"]] == [
+        "late high", "early", "elsewhere"]
+
+
+async def test_category_mode_fills_category_whatever_show_category_says(client):
+    """It is what the rows are grouped BY — the widget cannot draw a header for
+    a run it has not been told the name of."""
+    await make(client, "filed", project="work", due=day(-1))
+    await make(client, "loose", due=day(-1))
+
+    await put_prefs(client, widget={"group_by": "category",
+                                    "show_category": False})
+    assert [r["category"] for r in (await feed(client))["rows"]] == ["work", ""]
+
+
+async def test_category_mode_changes_the_order_and_nothing_else(client):
+    """The caps, the total behind them and the group filter are round 5's."""
+    for i in range(9):
+        await make(client, "task %d" % i, project="work", due=day(-1))
+    await make(client, "next week", project="work", due=day(3))   # not a group
+
+    await put_prefs(client, widget={"group_by": "category",
+                                    "rows": {"large": 4}})
+    body = await feed(client)
+    assert len(body["rows"]) == 4
+    assert body["total"] == 9                    # the nine overdue, not the ten
+    assert body["caps"] == {"small": 3, "medium": 5, "large": 4}
+    assert body["rows"][0]["due"] == "overdue"
+
+
+async def test_switching_back_to_due_restores_the_round_5_feed(client):
+    """The pref is the only state involved — nothing is written to a task."""
+    await make(client, "personal late", project="personal", due=day(-1))
+    await make(client, "work today", project="work", due=day(0))
+
+    await put_prefs(client, categories={"order": ["work", "personal"]},
+                    widget={"group_by": "category"})
+    assert [r["text"] for r in (await feed(client))["rows"]] == [
+        "work today", "personal late"]
+
+    await put_prefs(client, categories={"order": ["work", "personal"]},
+                    widget={"group_by": "due"})
+    body = await feed(client)
+    assert body["group_by"] == "due"
+    assert [r["text"] for r in body["rows"]] == ["personal late", "work today"]
+    assert [r["category"] for r in body["rows"]] == ["", ""]
 
 
 # --------------------------------------------------------------------------- #

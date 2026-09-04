@@ -15,7 +15,17 @@
 //  So "the widget is showing the wrong thing" is a Settings change or a server
 //  change, and never a change here. What IS still this file's business: the
 //  chrome — the "Today" header and its count, "+N more", "Nothing due 🎉", the
-//  "updated Xm ago" footer — the layout of a row, the check box, and the cache.
+//  "updated Xm ago" footer — the layout of a row, the category headers and what
+//  they cost, the check box, and the cache.
+//
+//  GROUPING (api.md, "Widget grouping by category"). The feed now also says how
+//  it is ORDERED, in a top-level `group_by`. "due" — or absent — is round 5
+//  exactly. "category" means the server has already sorted the rows into runs of
+//  one category, and this file draws a small header over each run and stops
+//  drawing the per-row "· category", which would only repeat the header. Which
+//  order, which categories, and what each row's `category` says are still the
+//  server's; the headers, and the half-a-row each one costs against what the
+//  family fits, are this file's.
 //
 //  It is still the native replacement for scriptable-today-widget.js in
 //  ~/projects/dashboards, which is fed separately by `pa` and unaffected (D1).
@@ -145,7 +155,7 @@ private let kArmedMaxAge: TimeInterval = 60
 // MARK: - The widget feed, exactly as api.md spells it
 //
 // `{"updated": iso, "total": int, "rows": [{uuid, text, due, overdue, group,
-// category}], "caps": {small, medium, large}}`.
+// category}], "caps": {small, medium, large}, "group_by": "due"|"category"}`.
 //
 // Every field but `uuid`, `text` and `rows` itself is Optional, so the
 // synthesised decoder uses decodeIfPresent and a server that omits one — or
@@ -173,8 +183,11 @@ private struct FeedRow: Decodable {
     /// already grouped and ordered, so nothing here reads it. Decoded so the
     /// shape in this file matches the shape in api.md.
     let group: String?
-    /// Filled only when `prefs.widget.show_category` is on; "" or absent when
-    /// it is off, and then nothing is drawn.
+    /// The row's category. Filled when `prefs.widget.show_category` is on —
+    /// and ALSO, whatever that says, when the feed is grouped by category, since
+    /// the header over each run is built out of it (api.md, round 6). "" or
+    /// absent means the task has no category: nothing is drawn beside the row,
+    /// and the run it belongs to is headed "No category".
     let category: String?
 }
 
@@ -198,8 +211,30 @@ private struct WidgetFeed: Decodable {
     /// since `rows` is the array" (api.md, which said `rows` for both until the
     /// collision was spotted building this). Absent, kFits* stands.
     let caps: FeedCaps?
+    /// How the server ORDERED the rows: "category", or "due"/absent for the
+    /// round-5 feed. The only field in this struct that changes how the rows are
+    /// DRAWN rather than what they say — see isGroupedByCategory().
+    let group_by: String?
 
-    // No CodingKeys: every property above is spelled exactly as the wire is.
+    // No CodingKeys: every property above is spelled exactly as the wire is —
+    // `group_by` included, underscore and all. The struct must not grow a
+    // CodingKeys enum to tidy that up: writing one means re-listing every key
+    // here, and one forgotten line there stops the whole feed decoding.
+}
+
+/// The one `group_by` value that changes the drawing.
+private let kGroupByCategory = "category"
+
+/// Whether this feed is the grouped one.
+///
+/// Anything else is the round-5 rendering: absent, null, "due", or a value from
+/// a newer server this build has never heard of. That is the safe way round — an
+/// unknown grouping drawn flat is still a correct list in the server's order,
+/// while an unknown grouping drawn with headers would put headers over runs that
+/// are not runs.
+private func isGroupedByCategory(_ raw: String?) -> Bool {
+    guard let raw = raw else { return false }
+    return raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == kGroupByCategory
 }
 
 // MARK: - How many rows a family gets
@@ -250,6 +285,55 @@ private func capsFrom(_ f: FeedCaps?) -> RowCaps {
                    large: saneCap(f.large, kFitsLarge))
 }
 
+/// The budget, in HALF-rows: a row is a row, a category header is half of one
+/// (api.md, round 6). Integers rather than a 0.5 Double because this decides
+/// whether a row is drawn, and a sum of halves that lands exactly on the budget
+/// must land ON it every single draw — not sometimes a hair over, depending on
+/// the order the additions happened in.
+///
+/// Half is what api.md wrote down, and it is an approximation on the generous
+/// side: a 10 pt header with 4 pt over it and 2 pt under is nearer 16 pt of the
+/// 26 pt a row takes. A grouped medium is therefore a few points fuller than an
+/// ungrouped one — noted here rather than quietly corrected, because the number
+/// is shared with the server and changing it is an api.md change, not this file's.
+private let kRowUnits = 5     // a row is 5 units
+private let kHeaderUnits = 3  // a 16 pt header against a 26 pt row is ~0.6 of a row, not 0.5
+
+/// How many rows this family can afford, given the category of each row in the
+/// order they will be drawn.
+///
+/// Two different limits, and they are not the same limit: `fits` is the space
+/// (rows AND the headers between them are paid for out of it), `cap` is the
+/// user's row count from Settings (headers are not rows and do not count
+/// against it). So a small widget fits 3 rows flat, but 2 rows and a header.
+///
+/// The walk STOPS at the first row it cannot afford rather than skipping on to a
+/// cheaper one further down. The rows arrive in the server's display order and
+/// skipping would silently reorder them — and a row lifted out of a later run
+/// would need a header of its own anyway. Stopping is also exactly what
+/// guarantees a header is never drawn with nothing under it: a header is only
+/// ever paid for as part of the row that follows it, so the two are taken
+/// together or not at all.
+private func groupedRowCount(_ categories: [String], cap: Int, fits: Int) -> Int {
+    let budget: Int = fits * kRowUnits
+    var spent: Int = 0
+    var taken: Int = 0
+    // nil rather than "": it has to differ from every category INCLUDING the
+    // empty one, so that a feed whose first run is the no-category run still
+    // buys that run its "No category" header.
+    var lastCategory: String? = nil
+
+    for category in categories {
+        if taken >= cap { break }
+        let cost: Int = kRowUnits + (lastCategory == category ? 0 : kHeaderUnits)
+        if spent + cost > budget { break }
+        spent += cost
+        taken += 1
+        lastCategory = category
+    }
+    return taken
+}
+
 // MARK: - Dates
 
 /// "just now" / "7m ago" / "3h ago" — the Scriptable widget's ago(). The one
@@ -275,10 +359,74 @@ struct TodayRow: Identifiable {
     /// with no clock on the task has nothing to say on the right of the row.
     let due: String
     let overdue: Bool
-    /// "" unless Settings → Widget asked for it. Never a lookup: whether a
-    /// category appears is the server's call, and this is only whether to draw
-    /// the string it sent.
+    /// "" unless the server sent one — because Settings → Widget asked for it,
+    /// or because the feed is grouped by it. Never a lookup: which categories
+    /// exist and which one a task is in is the server's call, and this is only
+    /// the string it sent. Grouped, it is what the run's header is built from
+    /// and it is NOT drawn on the row itself.
     let category: String
+}
+
+/// One line of the drawn list: a task row, or the header over the first row of a
+/// run of them. Built only by layoutItems(), and only a grouped feed ever
+/// produces a
+/// header.
+///
+/// The two ids cannot collide. A row's is the task's uuid, exactly as it was
+/// before this type existed — which is what keeps ForEach's identity for a row,
+/// and with it the optimistic flip of that row's Toggle, unchanged. A header's is
+/// that same uuid behind a prefix no uuid can contain, so two runs of the same
+/// category name — which the server should never send, but ForEach would draw
+/// wrong if it did — still get distinct ids.
+private enum TodayItem: Identifiable {
+    case header(String, over: String)
+    case row(TodayRow)
+
+    var id: String {
+        switch self {
+        case .header(_, let uuid): return "cat:" + uuid
+        case .row(let row):        return row.id
+        }
+    }
+}
+
+/// What the header over a run says. The server sends "" for "no category", and
+/// the header still has to name the run — a blank one would read as a gap in the
+/// list. Drawn through .textCase(.uppercase), so on screen it is "NO CATEGORY".
+private func categoryTitle(_ category: String) -> String {
+    return category.isEmpty ? "No category" : category
+}
+
+/// The list to draw: the rows this family can afford, and, when the feed is
+/// grouped, a header above the first row of each run.
+///
+/// Ungrouped is round 5 unchanged — the first min(cap, fits) rows and no headers
+/// — and it is written as its own branch rather than as a special case of the
+/// walk so that a feed without `group_by` cannot possibly draw differently than
+/// it did before any of this existed.
+private func layoutItems(rows: [TodayRow], grouped: Bool, cap: Int, fits: Int) -> [TodayItem] {
+    guard grouped else {
+        var flat: [TodayItem] = []
+        for row in rows.prefix(min(cap, fits)) { flat.append(TodayItem.row(row)) }
+        return flat
+    }
+
+    // The walk needs nothing from a row but its category, so it is handed
+    // nothing else: the budget is arithmetic over a list of strings, and is
+    // testable as such.
+    let categories: [String] = rows.map { (row: TodayRow) -> String in row.category }
+    let take: Int = groupedRowCount(categories, cap: cap, fits: fits)
+
+    var items: [TodayItem] = []
+    var lastCategory: String? = nil
+    for row in rows.prefix(take) {
+        if lastCategory != row.category {
+            items.append(TodayItem.header(categoryTitle(row.category), over: row.id))
+            lastCategory = row.category
+        }
+        items.append(TodayItem.row(row))
+    }
+    return items
 }
 
 struct TodayEntry: TimelineEntry {
@@ -290,6 +438,10 @@ struct TodayEntry: TimelineEntry {
     let total: Int
     /// The per-family row counts this feed came with, already resolved.
     let caps: RowCaps
+    /// Whether the feed said `group_by: "category"`. It decides two things and
+    /// only two: whether a header is drawn over each run, and whether a row
+    /// draws its own "· category" — it must not, the header just said it.
+    let groupByCategory: Bool
     /// When the shown list was actually fetched; nil when there has never been
     /// a successful fetch.
     let updated: Date?
@@ -311,6 +463,8 @@ private struct FeedContents {
     let rows: [TodayRow]
     let total: Int
     let caps: RowCaps
+    /// `group_by`, resolved to the one question anything downstream asks of it.
+    let groupByCategory: Bool
 }
 
 /// Decodes a response body. nil when the body is not the feed api.md promises —
@@ -345,7 +499,8 @@ private func decodeFeed(_ data: Data) -> FeedContents? {
     // only count there is.
     return FeedContents(rows: rows,
                         total: feed.total ?? rows.count,
-                        caps: capsFrom(feed.caps))
+                        caps: capsFrom(feed.caps),
+                        groupByCategory: isGroupedByCategory(feed.group_by))
 }
 
 /// The last body that parsed, decoded again on the way out. Storing the raw
@@ -365,6 +520,7 @@ private func cachedEntry(armed: Set<String>) -> TodayEntry? {
           let feed = decodeFeed(body) else { return nil }
     let when = store.object(forKey: kCacheDateKey) as? Date
     return TodayEntry(date: Date(), rows: feed.rows, total: feed.total, caps: feed.caps,
+                      groupByCategory: feed.groupByCategory,
                       updated: when, error: nil, armed: armed)
 }
 
@@ -579,15 +735,16 @@ struct TaskMasterProvider: TimelineProvider {
         // if one ever did, the server refuses anything that is not a full
         // 36-character uuid (api.md) and CompleteTaskIntent swallows the 404.
         //
-        // No categories on these: `show_category` is off by default, so this is
-        // what the widget looks like out of the box.
+        // No categories on these, and no grouping: `show_category` is off by
+        // default and `group_by` is "due", so this is what the widget looks like
+        // out of the box.
         let rows = [
             TodayRow(id: "1", text: "Water the plants", due: "overdue", overdue: true, category: ""),
             TodayRow(id: "2", text: "Call the dentist", due: "2:30 pm", overdue: false, category: ""),
             TodayRow(id: "3", text: "Pay the water bill", due: "today", overdue: false, category: "")
         ]
         return TodayEntry(date: Date(), rows: rows, total: rows.count, caps: .fallback,
-                          updated: Date(), error: nil, armed: [])
+                          groupByCategory: false, updated: Date(), error: nil, armed: [])
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TodayEntry) -> Void) {
@@ -612,7 +769,8 @@ struct TaskMasterProvider: TimelineProvider {
         // whoever reads it to the Tailscale app for no reason.
         guard serverBase() != nil else {
             let entry = TodayEntry(date: Date(), rows: [], total: 0, caps: .fallback,
-                                   updated: nil, error: "Server not configured", armed: armed)
+                                   groupByCategory: false, updated: nil,
+                                   error: "Server not configured", armed: armed)
             completion(Timeline(entries: [entry], policy: .after(next)))
             return
         }
@@ -625,7 +783,8 @@ struct TaskMasterProvider: TimelineProvider {
                 store.set(body, forKey: kCacheBodyKey)
                 store.set(now, forKey: kCacheDateKey)
                 entry = TodayEntry(date: now, rows: feed.rows, total: feed.total,
-                                   caps: feed.caps, updated: now, error: nil, armed: armed)
+                                   caps: feed.caps, groupByCategory: feed.groupByCategory,
+                                   updated: now, error: nil, armed: armed)
             } else if let cached = cachedEntry(armed: armed) {
                 // Off the tailnet, or the server is down. The last good list is
                 // more useful than an error, and the "updated Xm ago" footer is
@@ -633,7 +792,8 @@ struct TaskMasterProvider: TimelineProvider {
                 entry = cached
             } else {
                 entry = TodayEntry(date: Date(), rows: [], total: 0, caps: .fallback,
-                                   updated: nil, error: "Can't reach the server", armed: armed)
+                                   groupByCategory: false, updated: nil,
+                                   error: "Can't reach the server", armed: armed)
             }
             // .after, not .atEnd: there is exactly one entry, and its content
             // does not expire on a schedule the way prayerlist's day rollover
@@ -652,6 +812,13 @@ struct TaskMasterProvider: TimelineProvider {
 /// whole row — see the comment on the Toggle in rowBody().
 private let kSymbolSize: CGFloat = 18
 private let kTapTarget: CGFloat = 26
+
+/// The category header, and the air around it. Its own constants because the
+/// fraction of a row it is charged in kHeaderUnits is an assertion about exactly these
+/// three numbers against kTapTarget.
+private let kHeaderSize: CGFloat = 10
+private let kHeaderAbove: CGFloat = 4
+private let kHeaderBelow: CGFloat = 2
 
 /// How a row's Toggle draws: an empty circle that becomes a filled green check.
 ///
@@ -701,25 +868,22 @@ struct TaskMasterWidgetView: View {
     var entry: TodayEntry
     @Environment(\.widgetFamily) private var family
 
-    /// How many rows to draw: what Settings → Widget asked for, but never more
-    /// than the family has ROOM for. The cap is a preference and kFits* is a
-    /// fact about a 170 pt box, so the smaller of the two is the only answer
-    /// that cannot overflow — asking for 20 rows on a small widget gets 3.
+    /// What this family has ROOM for at the 26 pt row height: the fact kFits*
+    /// records, before any preference gets a say.
     ///
-    /// With no caps in the feed both sides are kFits*, and the limit is exactly
-    /// the 3/5/12 this widget has always used.
-    private var rowLimit: Int {
-        let fits: Int
+    /// It is half of the pair layoutItems() takes. The other half is the cap
+    /// Settings → Widget asked for, and the smaller of the two is the only row
+    /// count that
+    /// cannot overflow — asking for 20 rows on a small widget gets 3. With no
+    /// caps in the feed both sides are kFits*, and an ungrouped widget draws
+    /// exactly the 3/5/12 it always has.
+    private var fits: Int {
         switch family {
-        case .systemSmall:  fits = kFitsSmall
-        case .systemMedium: fits = kFitsMedium
-        default:            fits = kFitsLarge
+        case .systemSmall:  return kFitsSmall
+        case .systemMedium: return kFitsMedium
+        default:            return kFitsLarge
         }
-        return min(entry.caps.cap(for: family), fits)
     }
-
-    private var shown: [TodayRow] { Array(entry.rows.prefix(rowLimit)) }
-    private var hidden: Int { max(0, entry.total - shown.count) }
 
     private var footerText: String {
         guard let updated = entry.updated else { return "no data yet" }
@@ -737,6 +901,11 @@ struct TaskMasterWidgetView: View {
         // than from any @State so that a redraw during the grace period — the
         // app backgrounding is enough to trigger one — keeps it showing.
         let armed: Bool = entry.armed.contains(row.id)
+
+        // Hoisted out of the ViewBuilder below, where a two-clause condition is
+        // one more thing for the type-checker to solve inside the longest
+        // expression in the file.
+        let showCategory: Bool = !entry.groupByCategory && !row.category.isEmpty
 
         // .center, where this used to be .firstTextBaseline. Baseline alignment
         // lines an 18 pt glyph's baseline up with 13 pt text, which hangs the box
@@ -763,15 +932,18 @@ struct TaskMasterWidgetView: View {
                 .font(.system(size: 13))
                 .lineLimit(1)
                 .truncationMode(.tail)
-            // "Water the plants · work", drawn only when the server sent a
-            // category — which it does only when Settings → Widget asked for
-            // one. A separate Text rather than one interpolated string because
+            // "Water the plants · work", drawn when the server sent a category
+            // and the list is NOT grouped by one. Grouped, the header over this
+            // run has just said the word, and repeating it on every row is noise
+            // the description would be truncated to pay for.
+            //
+            // A separate Text rather than one interpolated string because
             // the two halves are different sizes and colours, and because the
             // DESCRIPTION is the half that gives way: it is the only flexible
             // view in this row, so SwiftUI hands the fixedSize ones their ideal
             // width and truncates it, which is the wanted order — the category
             // is a word, and half a word says nothing.
-            if !row.category.isEmpty {
+            if showCategory {
                 Text("· " + row.category)
                     .font(.system(size: 11))
                     .foregroundColor(.gray)
@@ -785,6 +957,84 @@ struct TaskMasterWidgetView: View {
                 .font(.system(size: 11))
                 .foregroundColor(row.overdue ? .red : .gray)
                 .fixedSize()
+        }
+    }
+
+    /// The header over one run of a category. Deliberately quiet — 10 pt, gray,
+    /// uppercased — so it reads as the divider it is and never competes with the
+    /// 13 pt descriptions underneath it.
+    ///
+    /// .textCase(.uppercase) is what puts "work" on screen as "WORK"; .smallCaps()
+    /// is the face the design names alongside it. On a string the case transform
+    /// has already uppercased there is nothing left for small caps to shrink, so
+    /// it is belt and braces — kept because it costs nothing and because it is
+    /// what makes the intent readable here.
+    ///
+    /// 4 pt over and 2 pt under: more air above than below, so the header sits
+    /// with the run it introduces rather than floating between two of them. The
+    /// list's own spacing is 0, so this padding is the whole of the gap.
+    private func headerBody(_ title: String) -> some View {
+        // Named rather than written as `.system(...).smallCaps()` inside the
+        // modifier: that form is an implicit member CHAIN, a newer piece of
+        // Swift than anything else in this file needs, and spelling the type out
+        // asks the type-checker nothing at all.
+        let font: Font = Font.system(size: kHeaderSize, weight: .semibold).smallCaps()
+
+        return Text(title)
+            .font(font)
+            .foregroundColor(.gray)
+            .textCase(.uppercase)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.top, kHeaderAbove)
+            .padding(.bottom, kHeaderBelow)
+    }
+
+    /// A header, or a row. @ViewBuilder because the two branches are different
+    /// view types, which is the one thing it is for.
+    @ViewBuilder
+    private func itemBody(_ item: TodayItem) -> some View {
+        switch item {
+        case .header(let title, _): headerBody(title)
+        case .row(let row):         rowBody(row)
+        }
+    }
+
+    /// The list: the rows this family can afford, their headers, and "+N more".
+    ///
+    /// Its own property, with plain statements before a single `return`, so that
+    /// layoutItems() runs ONCE per draw and the count "+N more" is measured
+    /// against is the count actually drawn — which in category mode is fewer rows
+    /// than the same family draws flat, because the headers were paid for out of
+    /// the same budget.
+    private var listBody: some View {
+        let items: [TodayItem] = layoutItems(rows: entry.rows,
+                                             grouped: entry.groupByCategory,
+                                             cap: entry.caps.cap(for: family),
+                                             fits: fits)
+
+        // Headers are not tasks. "+N more" is still `total` — everything that
+        // qualified server-side — less the ROWS on screen.
+        var drawn: Int = 0
+        for item in items {
+            if case .row = item { drawn += 1 }
+        }
+        let more: Int = max(0, entry.total - drawn)
+
+        // spacing 0 where it used to be 3: a row is now as tall as its 26 pt tap
+        // target rather than as tall as 13 pt of text, and the clear space that
+        // target leaves around the 18 pt glyph is already wider than the gap the
+        // old spacing drew. The header's own padding is what separates the runs.
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(items) { item in
+                itemBody(item)
+            }
+            if more > 0 {
+                Text("+" + String(more) + " more")
+                    .font(.system(size: 11))
+                    .foregroundColor(.gray)
+                    .padding(.top, 2)
+            }
         }
     }
 
@@ -810,21 +1060,7 @@ struct TaskMasterWidgetView: View {
                     .font(.system(size: 14))
                     .foregroundColor(.gray)
             } else {
-                // spacing 0 where it used to be 3: a row is now as tall as
-                // its 26 pt tap target rather than as tall as 13 pt of text,
-                // and the clear space that target leaves around the 18 pt glyph
-                // is already wider than the gap the old spacing drew.
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(shown) { row in
-                        rowBody(row)
-                    }
-                    if hidden > 0 {
-                        Text("+" + String(hidden) + " more")
-                            .font(.system(size: 11))
-                            .foregroundColor(.gray)
-                            .padding(.top, 2)
-                    }
-                }
+                listBody
             }
 
             Spacer(minLength: 0)

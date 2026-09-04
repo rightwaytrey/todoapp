@@ -40,6 +40,10 @@ TAG_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 
 SORT_MODES = ("due", "priority", "urgency", "manual")
 GROUPS = ("overdue", "today", "upcoming", "none")
+# What the widget's rows are grouped by (docs/api.md round 6). "due" is what
+# round 5 did and stays the default: a widget that regroups itself the moment
+# the server learns a new word would be a surprise on someone's home screen.
+GROUP_BYS = ("due", "category")
 
 # The two tags the filter bar offers (docs/design.md D9) — the default chip row
 # is the five pa categories then those, which is what the client shipped with.
@@ -163,6 +167,7 @@ class WidgetPrefs(BaseModel):
     category: Optional[str] = None
     rows: RowCaps = Field(default_factory=RowCaps)
     show_category: bool = False
+    group_by: str = "due"
 
     @field_validator("groups")
     @classmethod
@@ -197,6 +202,13 @@ class WidgetPrefs(BaseModel):
         if not isinstance(v, bool):
             raise ValueError("must be true or false")
         return v
+
+    @field_validator("group_by")
+    @classmethod
+    def v_group_by(cls, v):
+        if not isinstance(v, str) or v.strip() not in GROUP_BYS:
+            raise ValueError("must be one of %s" % ", ".join(GROUP_BYS))
+        return v.strip()
 
 
 class Prefs(BaseModel):

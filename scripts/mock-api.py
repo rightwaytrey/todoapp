@@ -59,6 +59,9 @@ CHIP_RE = re.compile(r"^[pt]:[A-Za-z0-9_.-]{1,40}$")
 RECUR_RE = re.compile(r"^[0-9]*[a-z]+$")
 SORT_MODES = ("due", "priority", "urgency", "manual")
 WIDGET_GROUPS = ("overdue", "today", "upcoming", "none")
+# How the feed is ORDERED (api.md, "Widget grouping by category"). It does not
+# change which tasks are in it -- widget.groups still decides that either way.
+WIDGET_GROUP_BY = ("due", "category")
 # Bounds on the widget's per-family row counts. The client's steppers use the
 # same numbers, and they are what the widget can actually DRAW at each family
 # size, not what the feed could carry: a medium set to 8 would clip four rows
@@ -73,7 +76,8 @@ DEFAULT_PREFS = {
     "widget": {"groups": ["overdue", "today"], "upcoming_days": 7,
                "category": None,
                "rows": {"small": 3, "medium": 5, "large": 12},
-               "show_category": False},
+               "show_category": False,
+               "group_by": "due"},
 }
 
 LOCK = threading.Lock()
@@ -173,6 +177,14 @@ def clean_prefs(body):
     if not isinstance(sc, bool):
         raise ApiError(422, "invalid_request", "widget.show_category must be a boolean")
     d["widget"]["show_category"] = sc
+    # Missing is "due", not a 422: a round-5 client PUTs a document without it
+    # every time it touches any other preference, and refusing those would
+    # break every editor on the screen for the sake of one it does not know.
+    gb = w.get("group_by", "due")
+    if gb not in WIDGET_GROUP_BY:
+        raise ApiError(422, "invalid_request",
+                       "widget.group_by must be one of " + ", ".join(WIDGET_GROUP_BY))
+    d["widget"]["group_by"] = gb
     return d
 
 
@@ -522,10 +534,29 @@ def widget_due_label(t):
     return "%s %s %d" % (d.strftime("%a"), d.strftime("%b"), d.day)
 
 
+# prefs.categories.order first and in that order, then every other category
+# alphabetically, then the uncategorised under "" last (api.md, round 6). The
+# bands never compare their second element against each other's, so the int in
+# the first and the tuple in the second are safe together.
+#
+# Alphabetically is CASE-FOLDED, matching the real server: a plain sort puts
+# every capitalised category ahead of every lower-case one ("Work" before
+# "admin"), which is not what "alphabetically" means to anyone reading the
+# widget. The raw name is the tiebreak so two spellings of one word still have
+# a stable order rather than depending on the dict's iteration.
+def widget_cat_rank(name, order):
+    if not name:
+        return (2, ("", ""))
+    if name in order:
+        return (0, (order.index(name), ""))
+    return (1, (name.lower(), name))
+
+
 def widget_feed():
     with LOCK:
         w = copy.deepcopy(PREFS["widget"])
         mode = PREFS["sort"]["mode"]
+        cat_order = list(PREFS["categories"]["order"])
         rows = [t for t in TASKS.values() if t["status"] == "pending"]
     horizon = local_date(w["upcoming_days"])
     keep = []
@@ -538,7 +569,16 @@ def widget_feed():
         if w["category"] and (t.get("project") or None) != w["category"]:
             continue
         keep.append(t)
-    keep.sort(key=lambda t: sort_key(t, mode))
+    # `groups` has already decided what is IN the feed; group_by only decides
+    # the order the rows come out in. By category that is category rank first
+    # and the normal display order inside each run -- so the widget can draw a
+    # heading at every change of category and still trust the order below it.
+    by_cat = w["group_by"] == "category"
+    if by_cat:
+        keep.sort(key=lambda t: (widget_cat_rank(t.get("project") or "", cat_order),
+                                 sort_key(t, mode)))
+    else:
+        keep.sort(key=lambda t: sort_key(t, mode))
     cap = w["rows"]["large"]
     out = []
     for t in keep[:cap]:
@@ -554,10 +594,13 @@ def widget_feed():
             # Only when the widget is actually going to draw it: an empty
             # string, not a name, is what "do not show the category" looks
             # like on the wire, so the widget has no decision left to make.
-            "category": (t.get("project") or "") if w["show_category"] else "",
+            # Grouping by category always draws it -- the run headings are the
+            # category names -- so show_category does not gate it there.
+            "category": ((t.get("project") or "")
+                         if (w["show_category"] or by_cat) else ""),
         })
     return {"updated": iso(now()), "total": len(keep), "rows": out,
-            "caps": w["rows"]}
+            "caps": w["rows"], "group_by": w["group_by"]}
 
 
 def clean_tags(v, field="tags"):

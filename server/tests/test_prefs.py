@@ -14,7 +14,7 @@ DEFAULTS = {
     "sort": {"mode": "due"},
     "widget": {"groups": ["overdue", "today"], "upcoming_days": 7,
                "category": None, "rows": {"small": 3, "medium": 5, "large": 12},
-               "show_category": False},
+               "show_category": False, "group_by": "due"},
 }
 
 
@@ -34,7 +34,7 @@ async def test_put_replaces_and_round_trips(client):
         "widget": {"groups": ["overdue", "today", "upcoming"],
                    "upcoming_days": 3, "category": "work",
                    "rows": {"small": 2, "medium": 4, "large": 20},
-                   "show_category": True},
+                   "show_category": True, "group_by": "category"},
     }
     r = await client.put("/api/prefs", json=body)
     assert r.status_code == 200
@@ -106,6 +106,10 @@ BAD = [
     ("widget", {"widget": {"category": "not a name"}}),
     ("widget", {"widget": {"rows": {"large": 500}}}),
     ("widget", {"widget": {"show_category": "yes"}}),
+    ("widget", {"widget": {"group_by": "project"}}),     # round 6: due|category
+    ("widget", {"widget": {"group_by": "Category"}}),    # not case-folded
+    ("widget", {"widget": {"group_by": 3}}),
+    ("widget", {"widget": {"group_by": None}}),
 ]
 
 
@@ -122,6 +126,17 @@ async def test_a_rejected_put_leaves_the_stored_document_alone(client):
     await client.put("/api/prefs", json={"sort": {"mode": "manual"}})
     await client.put("/api/prefs", json={"sort": {"mode": "nonsense"}})
     assert (await client.get("/api/prefs")).json()["sort"]["mode"] == "manual"
+
+
+async def test_group_by_defaults_to_due_and_takes_category(client):
+    """Round 6. The default is what round 5 did, so an existing prefs file —
+    which has no `group_by` at all — keeps the widget it already had."""
+    assert (await client.get("/api/prefs")).json()["widget"]["group_by"] == "due"
+
+    r = await client.put("/api/prefs", json={"widget": {"group_by": "category"}})
+    assert r.json()["widget"]["group_by"] == "category"
+    assert json.loads(settings.prefs_path.read_text())["widget"]["group_by"] \
+        == "category"
 
 
 async def test_names_are_de_duplicated_in_order(client):

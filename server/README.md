@@ -202,7 +202,7 @@ recurrence, categories, widget"; the reasoning is `docs/design.md` D14 and D15.*
 | `GET /api/meta` | Also returns `categories: [{name, count, hidden}]` in prefs order. `count` is pending tasks. |
 | `POST /api/categories/rename` | `{"from","to"}` → `204`. Moves every non-deleted task and the preferences with it. |
 | `POST /api/categories/delete` | `{"name","move_to"}` → `204`. The tasks survive; only the category goes. |
-| `GET /api/widget` | Finished rows for the home-screen widget: text, due label, overdue flag, already sorted and capped. |
+| `GET /api/widget` | Finished rows for the home-screen widget: text, due label, overdue flag, already sorted and capped. Round 6 adds `prefs.widget.group_by` — `"due"` (round 5, unchanged) or `"category"`, which reorders the same rows into category runs (`categories.order` first, then the rest alphabetically, no category last as `""`) and fills `category` on every row whatever `show_category` says — echoed back as a top-level `group_by`. |
 
 ### The preferences file
 
@@ -218,7 +218,7 @@ supported — there is no cache, so the next request picks it up:
   "widget":     {"groups": ["overdue","today"], "upcoming_days": 7,
                  "category": null,
                  "rows": {"small": 3, "medium": 5, "large": 12},
-                 "show_category": false}
+                 "show_category": false, "group_by": "due"}
 }
 ```
 

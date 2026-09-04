@@ -594,3 +594,15 @@ Labels in full, matching the client's `dueLabel()`: `""` (no due), `"overdue"`,
 `"Tomorrow"` / `"Tomorrow · 2:30 pm"`, `"Thu Sep 10"` (date-only, weekday
 carried), `"Sep 12 · 2:30 pm"` (clocked, weekday dropped so the row stays one
 line), and `"Sat Jan 2, 2027"` once the year differs.
+
+### Widget grouping by category (2026-09-04, round 6)
+
+`prefs.widget.group_by`: `"due"` (default) | `"category"`. `GET /api/widget`
+echoes it as top-level `"group_by"`. With `"category"`, rows are ordered by
+category — `prefs.categories.order` first, then other categories
+alphabetically (case-folded, raw name as tie-break), tasks with no category last under the name `""` — and within a
+category in the normal display order; every row carries `category` regardless
+of `show_category`. The widget draws a small header before the first row of
+each category run (no-category rows get the header "No category") and counts
+each header as roughly half a row against the family's cap. With `"due"`
+nothing changes from round 5.

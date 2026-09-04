@@ -778,6 +778,8 @@
   </p>
 
   <h2 class="group">Widget</h2>
+  <label>Group by</label>
+  <div class="seg" id="widgetGroupBy"></div>
   <label>Groups it shows</label>
   <div class="prefs" id="widgetGroups"></div>
   <label>Rows per widget size</label>
@@ -786,8 +788,9 @@
   <select id="widgetCat"></select>
   <div class="prefs" id="widgetOpts" style="margin-top:12px"></div>
   <p class="prefhint">
-    The widget picks this up on its next refresh (about 15 minutes) or when you
-    leave the app.
+    <b>Group by</b> orders the rows; <b>Category</b> puts each category under
+    its own heading and labels every row. Picked up on the widget's next
+    refresh (about 15 minutes), or when you leave the app.
   </p>
 
   <h2 class="group">This device</h2>
@@ -1121,6 +1124,9 @@ let qaCategory = lsGet(K.qaCategory, '');
 // every load.
 const SORT_MODES = ['due', 'priority', 'urgency', 'manual'];
 const WIDGET_GROUPS = ['overdue', 'today', 'upcoming', 'none'];
+// How the feed is ORDERED, not what is in it: `groups` still decides which
+// tasks the widget gets either way (api.md, "Widget grouping by category").
+const WIDGET_GROUP_BY = ['due', 'category'];
 // Bounds on the widget's rows, per family: what the widget can actually DRAW
 // at that size, not what the feed could carry. Same numbers as the server's.
 const ROW_BOUNDS = { small: [1, 3], medium: [1, 5], large: [1, 12] };
@@ -1130,7 +1136,8 @@ const DEFAULT_PREFS = {
                    't:claude', 't:alert'], hidden: [] },
   sort: { mode: 'due' },
   widget: { groups: ['overdue', 'today'], upcoming_days: 7, category: null,
-            rows: { small: 3, medium: 5, large: 12 }, show_category: false }
+            rows: { small: 3, medium: 5, large: 12 }, show_category: false,
+            group_by: 'due' }
 };
 
 function strList(v) { return Array.isArray(v) ? v.filter(x => typeof x === 'string') : []; }
@@ -1168,7 +1175,10 @@ function normPrefs(v) {
         medium: clampInt(rows.medium, ROW_BOUNDS.medium[0], ROW_BOUNDS.medium[1], 5),
         large: clampInt(rows.large, ROW_BOUNDS.large[0], ROW_BOUNDS.large[1], 12)
       },
-      show_category: !!w.show_category
+      show_category: !!w.show_category,
+      // A server that has never heard of it -- a round-5 document, or one this
+      // screen has not written yet -- means "due", the round-5 behaviour.
+      group_by: WIDGET_GROUP_BY.indexOf(w.group_by) >= 0 ? w.group_by : 'due'
     }
   };
 }
@@ -2530,8 +2540,17 @@ function chipEditorAct(act, v) {
 // ---- Settings → Widget -----------------------------------------------------
 const WIDGET_GROUP_LABELS = { overdue: 'Overdue', today: 'Today',
                               upcoming: 'Upcoming', none: 'No date' };
+const WIDGET_GROUP_BY_LABELS = { due: 'Due', category: 'Category' };
 function renderWidgetEditor() {
   const w = prefs.widget;
+  // Two exclusive choices, so a segmented control rather than two switches:
+  // there is no state with both off and none with both on, and the sort
+  // editor's switch list would offer one.
+  setHTML('widgetGroupBy', WIDGET_GROUP_BY.map(g =>
+    '<button data-gb="' + g + '"' + (g === w.group_by ? ' class="on"' : '') +
+    ' aria-pressed="' + (g === w.group_by ? 'true' : 'false') + '">' +
+    esc(WIDGET_GROUP_BY_LABELS[g]) + '</button>').join(''));
+
   const rows = WIDGET_GROUPS.map(g =>
     switchRow(w.groups.indexOf(g) >= 0, WIDGET_GROUP_LABELS[g],
               'data-g="' + g + '"', ''));
@@ -2554,8 +2573,14 @@ function renderWidgetEditor() {
       (c === w.category ? ' selected' : '') + '>' + esc(c) + '</option>').join(''));
   $('widgetCat').value = w.category || '';
 
+  // Grouping by category labels every row whatever this says (api.md). The
+  // switch still shows the STORED value -- it is what "Due" goes back to, and a
+  // tick that ignored the tap under it would be the worse lie of the two -- and
+  // the note says why the rows are labelled anyway.
   setHTML('widgetOpts', switchRow(w.show_category, 'Show the category on each row',
-                                  'data-opt="show_category"', ''));
+                                  'data-opt="show_category"',
+                                  w.group_by === 'category'
+                                    ? 'shown anyway, grouped by category' : ''));
 }
 function widgetGroupsAct(g, act, key) {
   if (g) {
@@ -3734,6 +3759,15 @@ $('catEditor').addEventListener('click', ev => {
 $('chipEditor').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]');
   if (b) chipEditorAct(b.getAttribute('data-act'), b.getAttribute('data-key'));
+});
+$('widgetGroupBy').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-gb]');
+  if (!b) return;
+  const v = b.getAttribute('data-gb');
+  // Tapping the segment that is already on is not a change; a PUT for it would
+  // spend the one in-flight slot saying nothing.
+  if (v === prefs.widget.group_by) return;
+  putPrefs(p => { p.widget.group_by = v; });
 });
 $('widgetGroups').addEventListener('click', ev => {
   const sw = ev.target.closest('button[data-g]');
