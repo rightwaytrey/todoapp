@@ -1,0 +1,63 @@
+# systemd USER unit: nothing here needs root.
+#
+# It runs as the login user, binds an unprivileged port (8101), and reads and
+# writes only files that user owns. There is no system unit, no /etc file and no
+# sudo anywhere in deploy/install.sh.
+#
+# Running as the *user* is not a convenience, it is the design. The service must
+# see ~/.taskrc and ~/.task, and — more importantly — it inherits the user's
+# session D-Bus, which is what lets Taskwarrior's on-add / on-modify hooks fire
+# `systemctl --user start --no-block pa-pushnow.service`. That unit is the chain
+# `task sync` -> `pa retag` -> `task sync` that republishes
+# /var/www/dash/todos/data.json, the Scriptable home-screen widget's feed
+# (docs/design.md D1). A root system unit would break that silently: the tasks
+# would be written and the phone widget would simply stop moving.
+#
+# Lingering is already enabled for this user on the home server, so it starts at
+# boot without anyone logging in. (Check: `loginctl show-user $USER -p Linger`.
+# If it ever says no, `sudo loginctl enable-linger $USER` is the one command
+# that needs root, and install.sh only warns about it — it never runs sudo.)
+#
+#   systemctl --user status  taskmaster-api
+#   systemctl --user restart taskmaster-api
+#   journalctl  --user -u    taskmaster-api -f
+
+[Unit]
+Description=TaskMaster API (FastAPI over the Taskwarrior CLI)
+Documentation=file:%h/projects/todoapp/docs/api.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/todoapp/server
+
+# Optional (the leading '-'). Put TASKMASTER_TOKEN and any extra
+# TASKMASTER_ALLOW_CIDRS here, mode 600. Auth is OFF unless this file sets a
+# token — the tailnet allowlist is the primary gate (docs/design.md D4).
+EnvironmentFile=-%h/.config/taskmaster/env
+
+Environment=PYTHONUNBUFFERED=1
+# Pinned even though the host is already America/Chicago: every `due` the API
+# emits is a local wall-clock string, so the zone is part of the contract, not
+# an ambient detail (docs/api.md Time).
+Environment=TZ=America/Chicago
+
+# 0.0.0.0 on purpose: the phone reaches this over the tailnet interface, not
+# loopback. The AccessControl middleware — not the bind address — is what keeps
+# everyone else out, so that it answers the same way behind `tailscale serve`.
+# One worker: app/taskwarrior.py serialises `task` behind one in-process lock,
+# and a second worker would be a second lock over the same SQLite file.
+# Access logs stay on: at a poll every 30 s only while the app is visible this
+# is a few hundred lines a day, and it is what makes "403 = you are not on the
+# tailnet" diagnosable from `journalctl` alone.
+ExecStart=%h/projects/todoapp/server/.venv/bin/uvicorn app.main:app \
+    --host 0.0.0.0 --port 8101 --workers 1
+
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

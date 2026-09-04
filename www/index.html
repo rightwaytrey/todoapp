@@ -1,0 +1,2749 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- user-scalable=no pairs with zoomEnabled:false in capacitor.config.ts.
+     viewport-fit=cover + the safe-area insets below keep content clear of the
+     notch and the home indicator — this app pins two bars to the bottom of the
+     screen, so getting the bottom inset wrong puts the tab bar under the home
+     indicator where it cannot be tapped. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TaskMaster">
+<meta name="color-scheme" content="light dark">
+<title>TaskMaster</title>
+<!--
+  The entire client. No framework, no build step, no external requests: the
+  only network traffic is JSON to the TaskMaster API (docs/api.md), whose base
+  URL lives in localStorage and is editable on Settings. Nothing is fetched
+  from a CDN — no fonts, no icon set — because the phone is often on a tailnet
+  with no route to the internet and a blank screen is not a degradation mode.
+
+  The two problems this replaces Taskchamp for (docs/design.md) shape every
+  decision in here:
+
+  1. FILTER CONFUSION. The Tasks screen shows EVERY pending task by default,
+     grouped Overdue / Today / Upcoming / No date, and nothing is tagged to
+     make it appear (D2). Filtering is one row of chips above that list --
+     All, a category (Taskwarrior's `project`, D13), or a tag -- with one
+     selection, a visible count, and the same groups underneath (D9). There is no query grammar, no saved filter
+     and nothing premium, which is the whole of what made Taskchamp's filters
+     confusing; and because the choice is a chip that is always on screen and
+     always says what it is, a task is never missing for a reason the screen
+     will not tell you.
+
+  2. SYNC LAG. There is no sync. Writes apply to the local model first and go
+     into an ordered queue that a drain loop sends; the server list wins on
+     every refresh with the unsent queue re-applied on top (D6). The screen
+     therefore moves at tap speed whether or not the phone can reach the server,
+     and "waiting for the server" is a pill in the header, not a spinner over
+     the list.
+
+  Screens are sections toggled by a hash router: #/tasks, #/done, #/settings,
+  and #/task/<uuid> which opens the detail sheet over the Tasks screen.
+  Everything user-supplied — descriptions, projects, tags, annotations, error
+  text from the server — goes through esc() on the way into innerHTML.
+
+  Dates are compared as LOCAL "YYYY-MM-DD" strings, never as Date instants.
+  See todayStr() for why that is not laziness.
+-->
+<style>
+  /* Light is the default palette and dark is the override, so a browser with
+     no stated preference — and the headless Chrome that takes the screenshots,
+     and a print — gets a complete, legible page instead of borrowing whatever
+     the host paints behind it.
+
+     The dark tokens are written twice on purpose: once under the media query
+     for the phone's real setting, and once under [data-theme="dark"] so
+     ?theme=dark can force it for a screenshot. The media-query copy is scoped
+     :not([data-theme="light"]) so an explicit light choice still wins on a
+     phone set to dark. */
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --card2: #eef1f5;
+    --line: #d8dee6;
+    --text: #10151c;
+    --dim: #5d6b7c;
+    --accent: #1a63d8;
+    --accent-text: #ffffff;
+    --green: #157a3a;
+    --green-bg: rgba(21,122,58,.12);
+    --red: #b3272d;
+    --red-bg: rgba(179,39,45,.12);
+    --amber: #8a6100;
+    --amber-bg: rgba(210,153,34,.18);
+    --violet: #6b3fc4;
+    --violet-bg: rgba(107,63,196,.12);
+    /* The wash a just-added row is painted with for ~1s. */
+    --flash: rgba(26,99,216,.14);
+    --shadow: 0 6px 24px rgba(16,21,28,.18);
+    /* Heights of the two fixed bottom bars. --qah is rewritten from JS to the
+       quick-add bar's real height (0 when it is hidden) so the list can never
+       end up underneath it. */
+    --tabh: 58px;
+    --qah: 0px;
+    --sab: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1116;
+      --card: #171c24;
+      --card2: #1f2630;
+      --line: #2b3442;
+      --text: #e6edf3;
+      --dim: #94a2b3;
+      --accent: #388bfd;
+      --accent-text: #ffffff;
+      --green: #3fb950;
+      --green-bg: rgba(46,160,67,.18);
+      --red: #f0555a;
+      --red-bg: rgba(209,52,56,.20);
+      --amber: #d29922;
+      --amber-bg: rgba(210,153,34,.16);
+      --violet: #a789f0;
+      --violet-bg: rgba(140,101,232,.20);
+      --flash: rgba(56,139,253,.20);
+      --shadow: 0 6px 24px rgba(0,0,0,.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116;
+    --card: #171c24;
+    --card2: #1f2630;
+    --line: #2b3442;
+    --text: #e6edf3;
+    --dim: #94a2b3;
+    --accent: #388bfd;
+    --accent-text: #ffffff;
+    --green: #3fb950;
+    --green-bg: rgba(46,160,67,.18);
+    --red: #f0555a;
+    --red-bg: rgba(209,52,56,.20);
+    --amber: #d29922;
+    --amber-bg: rgba(210,153,34,.16);
+    --violet: #a789f0;
+    --violet-bg: rgba(140,101,232,.20);
+    --flash: rgba(56,139,253,.20);
+    --shadow: 0 6px 24px rgba(0,0,0,.45);
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* An author `display` rule beats the UA sheet's [hidden]{display:none} no
+     matter how specific the UA rule is, so every element this file gives a
+     display to would ignore el.hidden = true. That is not theoretical: the
+     quick-add bar is display:flex and the sheet is display:flex, and both of
+     them sat on top of the Settings screen until this line existed. Toggle
+     visibility with el.hidden and let this rule mean it. */
+  [hidden] { display: none !important; }
+
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    /* 16px minimum on every input or iOS zooms the webview on focus. */
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             0 env(safe-area-inset-left);
+    min-height: 100vh;
+  }
+  :focus-visible {
+    outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 6px;
+  }
+
+  /* ---- header ---------------------------------------------------------- */
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 16px 9px; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--bg); z-index: 8;
+  }
+  header h1 { font-size: 19px; margin: 0; font-weight: 680; letter-spacing: .2px; }
+  header .headsub { font-size: 12.5px; color: var(--dim); margin-top: 1px; }
+  header .hright { display: flex; align-items: center; gap: 6px; flex: none; }
+  .statusbtn {
+    display: flex; align-items: center; gap: 6px; font: inherit; font-size: 12px;
+    font-weight: 600; color: var(--dim); background: var(--card2);
+    border: 1px solid transparent; border-radius: 999px; padding: 6px 10px;
+    max-width: 150px; cursor: pointer; min-height: 32px; position: relative;
+  }
+  /* The pill reads better as a small lozenge than as a 44px slab next to a
+     19px title, so the tap target is grown past the paint instead. */
+  .statusbtn::after { content: ''; position: absolute; inset: -6px -2px; }
+  .statusbtn span.t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .statusbtn.warn { background: var(--amber-bg); color: var(--amber); }
+  .statusbtn.bad  { background: var(--red-bg);   color: var(--red); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.ok  { background: var(--green); }
+  .dot.bad { background: var(--red); }
+  .dot.warn{ background: var(--amber); }
+  .iconbtn {
+    width: 44px; height: 44px; border-radius: 12px; border: 0; background: none;
+    color: var(--dim); cursor: pointer; display: flex; align-items: center;
+    justify-content: center; flex: none; padding: 0;
+  }
+  .iconbtn:active { background: var(--card2); }
+  .iconbtn svg { width: 21px; height: 21px; fill: none; stroke: currentColor;
+                 stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .iconbtn.spin svg { animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- layout ---------------------------------------------------------- */
+  main {
+    padding: 8px 16px calc(var(--tabh) + var(--qah) + var(--sab) + 20px);
+  }
+  h2.group {
+    display: flex; align-items: baseline; gap: 8px;
+    font-size: 12px; text-transform: uppercase; letter-spacing: .9px;
+    color: var(--dim); margin: 20px 0 8px; font-weight: 700;
+  }
+  h2.group:first-child { margin-top: 8px; }
+  h2.group.od { color: var(--red); }
+  h2.group .n { font-weight: 600; opacity: .75; letter-spacing: .4px; }
+  .empty { color: var(--dim); font-size: 15px; padding: 26px 4px; line-height: 1.55; }
+  .hint { font-size: 12.5px; color: var(--dim); line-height: 1.5; margin: 6px 0 0; }
+
+  /* ---- filter chips (design.md D9) ------------------------------------- */
+  /* One row, one selection, no grammar. It bleeds to both screen edges --
+     negative margins against main's 16px padding -- so a chip that runs off
+     the right is visibly cut in half rather than looking like the end of the
+     set, which is the only affordance a horizontal scroller gets on a phone. */
+  .filterbar {
+    display: flex; align-items: center; gap: 8px;
+    overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+    margin: 0 -16px; padding: 8px 16px 10px;
+    border-bottom: 1px solid var(--line); scrollbar-width: none;
+  }
+  .filterbar::-webkit-scrollbar { display: none; }
+  .fchip {
+    position: relative; flex: none; white-space: nowrap; cursor: pointer;
+    display: flex; align-items: center; gap: 6px;
+    font: inherit; font-size: 13.5px; font-weight: 620; min-height: 36px;
+    padding: 7px 13px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--card); color: var(--dim);
+  }
+  /* Grow the tap target past the paint instead of growing the paint, the same
+     trick the status pill uses. The 8px gap is wider than the 2px horizontal
+     bleed, so two chips never overlap each other's hit area. */
+  .fchip::after { content: ''; position: absolute; inset: -5px -2px; }
+  .fchip.on { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  .fchip .fn { font-variant-numeric: tabular-nums; font-weight: 750; opacity: .85; }
+  .fchip .h { opacity: .55; font-weight: 700; }   /* the # on a tag chip */
+
+  /* ---- task rows ------------------------------------------------------- */
+  .list {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    overflow: hidden;
+  }
+  .task { display: flex; align-items: flex-start; gap: 11px; padding: 0 12px 0 10px;
+          border-bottom: 1px solid var(--line); }
+  .task:last-child { border-bottom: 0; }
+  .task.gone { opacity: .45; }
+  .task.gone .desc { text-decoration: line-through; }
+  /* The 5 s Undo is worthless if the row vanishes before the eye has followed
+     it, so a completed row strikes through and fades on the spot and is only
+     then dropped from the list. See renderHold in the script. */
+  .task.completing { animation: strikeout .32s ease forwards; }
+  .task.completing .desc { text-decoration: line-through; color: var(--dim); }
+  @keyframes strikeout { to { opacity: .18; transform: translateX(8px); } }
+  .check {
+    flex: none; width: 44px; height: 44px; margin-top: 5px; padding: 0;
+    border: 0; background: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .check i {
+    display: block; width: 23px; height: 23px; border-radius: 50%;
+    border: 2px solid var(--line); position: relative;
+  }
+  .check.on i { border-color: var(--green); background: var(--green); }
+  .check svg {
+    position: absolute; inset: -2px; width: 23px; height: 23px; fill: none;
+    stroke: var(--card); stroke-width: 2.6; stroke-linecap: round;
+    stroke-linejoin: round; opacity: 0;
+  }
+  .check.on svg { opacity: 1; }
+  .check:active i { transform: scale(.9); }
+
+  /* ---- tap feedback: the grace period ---------------------------------- */
+  /* The widget ticks the box the moment it is tapped, keeps the row for a few
+     seconds during which a second tap takes it back, and only then removes it.
+     These are the classes arm()/cancelArm()/commitArm() in the script drive;
+     the state machine and the timings live there, this is only the paint.
+
+     An armed row must not move ANY other row: the strike-through, the filled
+     circle and the fading are all things that leave the row's box exactly the
+     size it was, so the list under it does not jump while it is decidable. */
+  .check i { transition: border-color .15s ease, background-color .15s ease; }
+  .check svg { transition: opacity .13s ease; }
+  /* The bounce, re-triggered on every arm and every cancel. Overrides the
+     :active scale above for its 150 ms, which is what an animation is for. */
+  .check.pop i { animation: checkpop .15s ease; }
+  @keyframes checkpop {
+    0%   { transform: scale(1); }
+    45%  { transform: scale(1.28); }
+    100% { transform: scale(1); }
+  }
+
+  /* Armed on the Tasks tab: it looks completed, and nothing has been sent. */
+  .task.arm-done .desc { text-decoration: line-through; color: var(--dim); }
+  /* Armed on the Done tab: the reverse -- these two beat .task.gone above by
+     coming later at the same specificity, so the strike lifts and the row
+     comes back to full strength while it is still decidable. */
+  .task.arm-undone { opacity: 1; }
+  .task.arm-undone .desc { text-decoration: none; color: var(--text); }
+
+  /* The way out, once the grace has elapsed and the op is queued. The height
+     is written from JS (a real px value, then 0) because a flex row has no
+     height to transition from on its own. */
+  .task.collapsing {
+    overflow: hidden;
+    transition: height .25s ease, opacity .25s ease, border-bottom-width .25s ease;
+  }
+
+  /* A just-added row, so the tap that added it is visibly acknowledged where
+     the row appears rather than only in the input clearing. */
+  .task.justadded { animation: addflash .9s ease; }
+  @keyframes addflash { from { background: var(--flash); } to { background: transparent; } }
+  .taskbody {
+    flex: 1; min-width: 0; padding: 11px 0 11px 0; cursor: pointer;
+    background: none; border: 0; text-align: left; font: inherit; color: inherit;
+    display: block; width: 100%;
+  }
+  .desc {
+    font-size: 16px; line-height: 1.35; color: var(--text); word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .meta {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+    margin-top: 5px; font-size: 12.5px; color: var(--dim); line-height: 1.5;
+  }
+  .meta .sep { opacity: .5; }
+  .meta .due.od { color: var(--red); font-weight: 650; }
+  .meta .due.now { color: var(--accent); font-weight: 650; }
+  .badge {
+    font-size: 11px; font-weight: 750; letter-spacing: .4px; line-height: 1;
+    padding: 3px 6px; border-radius: 5px; background: var(--card2); color: var(--dim);
+  }
+  .badge.H { background: var(--red-bg);   color: var(--red); }
+  .badge.M { background: var(--amber-bg); color: var(--amber); }
+  .badge.L { background: var(--card2);    color: var(--dim); }
+  .tagchip {
+    font-size: 11.5px; font-weight: 650; line-height: 1; padding: 4px 7px;
+    border-radius: 999px; background: var(--card2); color: var(--dim);
+  }
+  .tagchip.claude { background: var(--violet-bg); color: var(--violet); }
+  .tagchip.alert  { background: var(--red-bg);    color: var(--red); }
+  .tagchip.blocked{ background: var(--amber-bg);  color: var(--amber); }
+  .recur { font-size: 13px; color: var(--dim); }
+  .pendingdot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--amber); flex: none;
+  }
+
+  /* ---- button tasks (design.md D9) -------------------------------------- */
+  /* Anything upstream can stage a pending task tagged `button` to give the
+     phone a one-tap way to trigger it. Completing one does not just tick a
+     box: it fires something downstream, and that is far too much to hang off
+     a 23px circle sitting in a column of nine identical ones -- one already
+     went off by accident, 2026-09-04 11:39, from this app. So the row gets no
+     circle at all: a red-outlined pill that says what it does, and a confirm
+     in front of the ordinary complete path. */
+  .task.buttonrow { flex-direction: column; align-items: stretch; gap: 0; padding: 0 12px; }
+  .task.buttonrow .taskbody { padding: 11px 0 3px; }
+  .task.buttonrow .desc { font-size: 14px; color: var(--dim); }
+  .buttonpill {
+    display: block; width: 100%; margin: 0 0 12px; cursor: pointer;
+    font: inherit; font-size: 15.5px; font-weight: 700; letter-spacing: .1px;
+    padding: 11px 12px; min-height: 46px; border-radius: 999px;
+    border: 1.5px solid var(--red); background: var(--red-bg); color: var(--red);
+  }
+  /* The pill is the one control on the screen that acts downstream, so the
+     press has to be unmistakable -- a scale and a dip in opacity, both
+     short enough to be over before the confirm dialog paints. */
+  .buttonpill { transition: transform .12s ease, opacity .12s ease; }
+  .buttonpill:active { transform: scale(.96); opacity: .72; }
+
+  /* ---- generic controls ------------------------------------------------ */
+  button { font-family: inherit; }
+  .btn {
+    display: inline-block; font-size: 16px; font-weight: 620; padding: 12px 14px;
+    border-radius: 12px; border: 1px solid var(--line); background: var(--card2);
+    color: var(--text); cursor: pointer; min-height: 46px; text-align: center;
+  }
+  .btn { transition: transform .12s ease, opacity .12s ease; }
+  .btn:active { transform: scale(.97); opacity: .8; }
+  .btn[disabled] { opacity: .45; }
+  .btn.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  .btn.danger  { background: var(--red-bg); color: var(--red); border-color: transparent; }
+  .btn.wide { display: block; width: 100%; }
+  .btn.small { font-size: 14px; padding: 8px 12px; min-height: 44px; }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .btnrow .btn { flex: 1 1 0; min-width: 100px; }
+  label { display: block; font-size: 12.5px; color: var(--dim); margin: 16px 0 5px; font-weight: 650; }
+  input[type=text], input[type=date], input[type=time], input[type=url], select, textarea {
+    width: 100%; font: inherit; font-size: 16px; padding: 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+    min-height: 46px;
+  }
+  textarea { line-height: 1.4; resize: vertical; }
+  .seg { display: flex; background: var(--card2); border-radius: 12px; padding: 3px; }
+  .seg button {
+    flex: 1; border: 0; background: none; color: var(--dim); font: inherit;
+    font-size: 15px; font-weight: 650; padding: 10px 6px; border-radius: 10px;
+    cursor: pointer; min-height: 44px;
+  }
+  .seg button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.14); }
+  .seg button.on.H { color: var(--red); }
+  .seg button.on.M { color: var(--amber); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+    border-radius: 999px; padding: 9px 13px; font: inherit; font-size: 14px;
+    font-weight: 620; cursor: pointer; min-height: 44px;
+  }
+  .chip.on { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  .banner { font-size: 14px; border-radius: 12px; padding: 12px 14px; line-height: 1.55;
+            background: var(--card2); margin-top: 12px; }
+  .banner.good { background: var(--green-bg); }
+  .banner.bad  { background: var(--red-bg); }
+  .kv { border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  .kv div { display: flex; justify-content: space-between; gap: 12px; padding: 11px 13px;
+            border-bottom: 1px solid var(--line); font-size: 14px; }
+  .kv div:last-child { border-bottom: 0; }
+  .kv b { font-weight: 600; color: var(--dim); }
+  .kv span { text-align: right; word-break: break-all; }
+  .mono { font-variant-numeric: tabular-nums; font-family: "SF Mono", ui-monospace, monospace; }
+  .tiny { font-size: 12px; color: var(--dim); line-height: 1.55; }
+
+  /* ---- quick add (pinned above the tab bar) ---------------------------- */
+  /* Thumb-reachable on purpose: capture is the thing this app has to be
+     fastest at, and the top of a 6.1" screen is not where a thumb lives. */
+  .quickadd {
+    position: fixed; left: 0; right: 0; bottom: calc(var(--tabh) + var(--sab));
+    background: var(--bg); border-top: 1px solid var(--line);
+    padding: 8px 12px; z-index: 9;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .qarow { display: flex; gap: 7px; align-items: center; }
+  /* The field is the only thing on the row allowed to lose width. Two chips and
+     Add have to fit beside it on a 390pt screen, so both chips are capped and
+     ellipsised rather than allowed to squeeze the field to nothing -- and both
+     keep .chip's 44px min-height, because the row may lose width and must never
+     lose tap target. */
+  .qarow #qaText { flex: 1 1 40px; min-width: 0; }
+  .qachip {
+    flex: none; white-space: nowrap; padding: 9px 10px; font-size: 13px;
+    max-width: 98px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .qachip.set { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  /* The two chips say "set" differently ON PURPOSE. The date chip fills, as it
+     has since 1.0.3. The category chip outlines instead, because filling it too
+     puts three solid accent pills in a row -- category, date, Add -- which read
+     as one blue blob with the button that actually adds the task lost inside
+     it. Outlined, it is still obviously chosen, and Add is still the only solid
+     thing on the row. */
+  #qaCat.set {
+    background: var(--card); color: var(--accent);
+    border-color: var(--accent); font-weight: 700;
+  }
+  #qaAdd { flex: none; padding: 12px 14px; }
+  /* Add is tapped more than anything else in the app and is the one whose
+     result (a row, further up, behind the keyboard) is easiest to miss, so
+     it presses harder than an ordinary .btn. The row it makes flashes too
+     -- see .task.justadded. */
+  #qaAdd:active { transform: scale(.94); opacity: .78; }
+  #qaPickRow #qaDate { flex: 1; }
+  /* Only on screen while a project chip is selected, so the bar changes height
+     -- measureBars() has to run whenever it is toggled or the last row hides
+     underneath it. */
+  .qahint { font-size: 12px; color: var(--dim); line-height: 1.4; padding: 0 2px; }
+  .qahint b { color: var(--text); font-weight: 700; }
+
+  /* ---- bottom tab bar -------------------------------------------------- */
+  nav.tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    display: flex; background: var(--bg); border-top: 1px solid var(--line);
+    padding-bottom: var(--sab);
+  }
+  nav.tabs button {
+    flex: 1; border: 0; background: none; color: var(--dim); cursor: pointer;
+    font: inherit; font-size: 11px; font-weight: 650; letter-spacing: .2px;
+    height: var(--tabh); display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 3px; padding: 0;
+  }
+  nav.tabs button svg {
+    width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  nav.tabs button.on { color: var(--accent); }
+  nav.tabs button .badgecount {
+    position: absolute; margin: -18px 0 0 18px; background: var(--red); color: #fff;
+    border-radius: 999px; font-size: 10px; padding: 1px 5px; font-weight: 700;
+  }
+
+  /* ---- detail sheet ---------------------------------------------------- */
+  .sheet {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 30;
+    display: flex; align-items: flex-end;
+  }
+  .sheet .inner {
+    background: var(--card); width: 100%; max-height: 92vh; overflow-y: auto;
+    border-radius: 18px 18px 0 0; border-top: 1px solid var(--line);
+    /* No bottom padding here: the sticky action bar below carries it, so it
+       sits flush on the sheet's bottom edge instead of leaving a gap that the
+       scrolling content shows through. */
+    padding: 8px 16px 0;
+  }
+  .sheet .grab { width: 38px; height: 4px; border-radius: 2px; background: var(--line);
+                 margin: 2px auto 8px; }
+  .sheet .sheethead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .sheet h3 { margin: 0; font-size: 17px; font-weight: 680; }
+  .sheet .row2 { display: flex; gap: 8px; }
+  .sheet .row2 > * { flex: 1; min-width: 0; }
+  .annos { border: 1px solid var(--line); border-radius: 12px; }
+  .annos .an { padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 14px;
+               line-height: 1.5; word-break: break-word; }
+  .annos .an:last-child { border-bottom: 0; }
+  .annos .an .when { font-size: 11.5px; color: var(--dim); display: block; margin-bottom: 2px; }
+  .addrow { display: flex; gap: 8px; margin-top: 8px; }
+  .addrow input { flex: 1; min-width: 0; }
+  /* Save and Delete stick to the bottom of the sheet's own scroll area. The
+     sheet is taller than the screen on any task with a couple of notes, and
+     "I edited it and could not find Save" is not a failure mode worth having. */
+  .sheet .actions {
+    position: sticky; bottom: 0; background: var(--card); z-index: 2;
+    margin-top: 20px; padding: 10px 0 calc(14px + var(--sab));
+    border-top: 1px solid var(--line); display: flex; gap: 8px;
+  }
+  .sheet .actions .btn { flex: 1 1 0; }
+
+  /* ---- the category picker (design.md D13) ----------------------------- */
+  /* The detail sheet's shell, one list long: same backdrop, same rounded top,
+     same grab handle, so it reads as the same kind of thing rather than a new
+     control. It has no Save -- a tap on a row IS the answer -- so it carries
+     its own bottom padding where the detail sheet's sticky action bar carries
+     that one's. */
+  #catSheet .inner { padding-bottom: calc(14px + var(--sab)); }
+  .picklist {
+    border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+    margin-top: 10px;
+  }
+  .picklist button {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    width: 100%; border: 0; border-bottom: 1px solid var(--line);
+    background: var(--card); color: var(--text); font: inherit; font-size: 16px;
+    padding: 13px 14px; min-height: 52px; text-align: left; cursor: pointer;
+  }
+  .picklist button:last-child { border-bottom: 0; }
+  .picklist button:active { background: var(--card2); }
+  .picklist button.on { color: var(--accent); font-weight: 700; }
+  .picklist .tick { flex: none; font-weight: 800; opacity: 0; }
+  .picklist button.on .tick { opacity: 1; }
+  /* Last in the list and dimmed: it is the way out of the list, not a member. */
+  .picklist button.new { color: var(--dim); }
+
+  /* ---- toast ----------------------------------------------------------- */
+  /* Sits above BOTH bottom bars, not above the tab bar alone: the Undo button
+     is useless if the quick-add covers it. */
+  #toast {
+    position: fixed; left: 12px; right: 12px;
+    bottom: calc(var(--tabh) + var(--qah) + var(--sab) + 10px);
+    background: var(--text); color: var(--bg); border-radius: 12px;
+    padding: 11px 12px 11px 15px; font-size: 15px; line-height: 1.35; z-index: 40;
+    box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px;
+  }
+  #toast.bad { background: var(--red); color: #fff; }
+  #toastText { flex: 1; min-width: 0; }
+  #toastAction {
+    flex: none; font: inherit; font-size: 15px; font-weight: 700; border: 0;
+    border-radius: 9px; padding: 8px 12px; min-height: 40px; cursor: pointer;
+    background: rgba(255,255,255,.16); color: inherit;
+  }
+  footer {
+    padding: 16px 0 4px; font-size: 12px; color: var(--dim); line-height: 1.6;
+    border-top: 1px solid var(--line); margin-top: 22px;
+  }
+
+  /* ---- reduced motion --------------------------------------------------- */
+  /* Everything above is decoration on a state the app is in anyway, so all of
+     it can go. What must NOT go with it is the behaviour: the grace period is
+     still 1.2 s, a second tap still cancels inside it, the row still leaves
+     only afterwards and the Undo toast still stands for its 5 s. Someone who
+     has asked for less movement has not asked to lose the chance to take a tap
+     back -- they are the likeliest to need it.
+
+     The press states keep their opacity dip and lose only the scale: a change
+     of colour on :active is a state, not motion, and it is the whole of the
+     feedback once the transform is gone. The refresh spinner is left alone; it
+     is the only thing on screen saying a request is in flight. */
+  @media (prefers-reduced-motion: reduce) {
+    .check i, .check svg, .task.collapsing, .btn, .buttonpill {
+      transition: none !important;
+    }
+    .check.pop i, .task.completing, .task.justadded { animation: none !important; }
+    .check:active i, .btn:active, #qaAdd:active, .buttonpill:active {
+      transform: none;
+    }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>TaskMaster</h1>
+    <div class="headsub" id="headSub">loading…</div>
+  </div>
+  <div class="hright">
+    <button class="statusbtn" id="statusPill" aria-label="Sync status — tap to sync now" aria-live="polite">
+      <span class="dot" id="dot"></span><span class="t" id="statusText">starting</span>
+    </button>
+    <button class="iconbtn" id="btnRefresh" aria-label="Refresh from the server">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 3.5v5h-5"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<main>
+
+<!-- ===================== Tasks ========================================== -->
+<section id="scr-tasks" hidden>
+  <!-- One row of chips, filled by renderFilterBar(). The empty state's text is
+       written from JS too, because inside a filter it has to name the filter. -->
+  <div class="filterbar" id="filterbar" role="group"
+       aria-label="Filter by category or tag"></div>
+  <div id="groups"></div>
+  <div class="empty" id="tasksEmpty" hidden></div>
+</section>
+
+<!-- ===================== Done =========================================== -->
+<section id="scr-done" hidden>
+  <div id="doneGroups"></div>
+  <div class="empty" id="doneEmpty" hidden>
+    Nothing completed in the last 30 days.
+  </div>
+</section>
+
+<!-- ===================== Settings ======================================= -->
+<section id="scr-settings" hidden>
+  <h2 class="group">Server</h2>
+  <label for="setBase">Server URL</label>
+  <input type="text" id="setBase" inputmode="url" autocapitalize="none"
+         autocorrect="off" spellcheck="false" placeholder="http://host:8101">
+  <p class="hint">
+    Plain HTTP over the tailnet on purpose — WireGuard already encrypts the path
+    and the API refuses anything that is not loopback or <span class="mono">100.64.0.0/10</span>
+    (design.md D4).
+    <span id="setBaseDefault"></span>
+  </p>
+
+  <label for="setToken">Token (optional)</label>
+  <input type="text" id="setToken" autocapitalize="none" autocorrect="off"
+         spellcheck="false" placeholder="leave empty unless TASKMASTER_TOKEN is set">
+
+  <div class="btnrow">
+    <button class="btn primary" id="setSave">Save</button>
+    <button class="btn" id="setTest">Test connection</button>
+  </div>
+  <div class="banner" id="setTestOut" hidden></div>
+
+  <h2 class="group">This device</h2>
+  <div class="kv">
+    <div><b>Build</b><span class="mono" id="build">__BUILD__</span></div>
+    <div><b>Bundle</b><span class="mono" id="bundle">__BUNDLE__</span></div>
+    <div><b>Last refresh</b><span id="setLastSync">never</span></div>
+    <div><b>Cached</b><span id="setCounts">—</span></div>
+    <div><b>Waiting to send</b><span id="setQueue">0</span></div>
+  </div>
+  <div class="btnrow">
+    <button class="btn" id="setRetry">Send waiting changes now</button>
+  </div>
+  <div class="btnrow">
+    <button class="btn danger wide" id="setClear">Clear local cache</button>
+  </div>
+  <p class="hint">
+    Clearing drops the cached lists, the ETag and anything still waiting to be
+    sent. Tasks already on the server are untouched.
+  </p>
+
+  <footer>
+    TaskMaster — the phone front-end for the tasks in Taskwarrior on the home server.
+    Every pending task is on the Tasks screen unless a chip up there is
+    narrowing it, and the chip says so and says how many.
+    Writes apply here first and are sent when the phone can reach the server.
+  </footer>
+</section>
+
+</main>
+
+<!-- ===================== quick add ====================================== -->
+<div class="quickadd" id="quickadd" hidden>
+  <div class="qarow">
+    <input type="text" id="qaText" enterkeyhint="done" autocapitalize="sentences"
+           autocorrect="on" placeholder="Add a task" aria-label="New task">
+    <button class="chip qachip" id="qaCat" aria-label="Category for new tasks">Category</button>
+    <button class="chip qachip" id="qaDue" aria-label="Due date for the new task">No date</button>
+    <button class="btn primary" id="qaAdd">Add</button>
+  </div>
+  <div class="qahint" id="qaHint" hidden></div>
+  <div class="qarow" id="qaPickRow" hidden>
+    <input type="date" id="qaDate" aria-label="Pick a due date">
+    <button class="btn small" id="qaPickClear">Clear</button>
+  </div>
+</div>
+
+<!-- ===================== tab bar ======================================== -->
+<nav class="tabs" id="tabs">
+  <button id="tabTasks" data-go="#/tasks">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7h1M4 12h1M4 17h1M9 7h11M9 12h11M9 17h7"/>
+    </svg>Tasks
+  </button>
+  <button id="tabDone" data-go="#/done">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.6"/><path d="M8.2 12.4l2.6 2.6 5-5.4"/>
+    </svg>Done
+  </button>
+  <button id="tabSettings" data-go="#/settings">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7.5h8M16.5 7.5H20M4 16.5h3.5M12 16.5h8"/>
+      <circle cx="14.2" cy="7.5" r="2.3"/><circle cx="9.8" cy="16.5" r="2.3"/>
+    </svg>Settings
+  </button>
+</nav>
+
+<!-- ===================== detail sheet =================================== -->
+<div class="sheet" id="sheet" hidden role="dialog" aria-modal="true" aria-label="Task detail">
+  <div class="inner" id="sheetInner">
+    <div class="grab"></div>
+    <div class="sheethead">
+      <h3 id="shTitle">Task</h3>
+      <button class="iconbtn" id="shClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <label for="shDesc">Description</label>
+    <textarea id="shDesc" rows="2"></textarea>
+
+    <!-- "Category" is the user's word for it; the field, the API and every
+         identifier below stay `project`, which is what Taskwarrior calls it
+         (design.md D13). -->
+    <label for="shProject">Category</label>
+    <select id="shProject"></select>
+    <input type="text" id="shNewProject" hidden placeholder="new category name"
+           autocapitalize="none" autocorrect="off" spellcheck="false"
+           aria-label="New category name" style="margin-top:8px">
+
+    <label>Priority</label>
+    <div class="seg" id="shPriority">
+      <button data-p="" aria-label="No priority">—</button>
+      <button data-p="L" class="L">L</button>
+      <button data-p="M" class="M">M</button>
+      <button data-p="H" class="H">H</button>
+    </div>
+
+    <label>Due</label>
+    <div class="row2">
+      <input type="date" id="shDate" aria-label="Due date">
+      <input type="time" id="shTime" aria-label="Due time">
+    </div>
+    <div class="btnrow" style="margin-top:8px">
+      <button class="btn small" id="shClearTime">Clear time</button>
+      <button class="btn small" id="shClearDue">Clear due</button>
+    </div>
+    <p class="hint">
+      Date only = shows in the morning list. Add a time = Pushover reminder at
+      that time.
+    </p>
+
+    <label>Tags</label>
+    <div class="chips" id="shTags"></div>
+    <div class="addrow">
+      <input type="text" id="shNewTag" placeholder="add a tag" autocapitalize="none"
+             autocorrect="off" spellcheck="false" aria-label="Add a tag">
+      <button class="btn small" id="shAddTag">Add</button>
+    </div>
+
+    <label>Notes</label>
+    <div class="annos" id="shAnnos"></div>
+    <div class="addrow">
+      <input type="text" id="shNewNote" placeholder="add a note" aria-label="Add a note">
+      <button class="btn small" id="shAddNote">Add</button>
+    </div>
+
+    <p class="tiny" id="shFoot" style="margin-top:16px"></p>
+
+    <div class="actions">
+      <button class="btn danger" id="shDelete">Delete</button>
+      <button class="btn primary" id="shSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== category picker =============================== -->
+<!-- Short on purpose: a list, and the way to add to it. Choosing is a tap on a
+     row, so there is no Save to miss (design.md D13). -->
+<div class="sheet" id="catSheet" hidden role="dialog" aria-modal="true"
+     aria-label="Choose a category for new tasks">
+  <div class="inner">
+    <div class="grab"></div>
+    <div class="sheethead">
+      <h3>Category</h3>
+      <button class="iconbtn" id="catClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <p class="hint" id="catHint"></p>
+    <div class="picklist" id="catList"></div>
+  </div>
+</div>
+
+<!-- ===================== toast ========================================== -->
+<div id="toast" hidden role="status" aria-live="polite">
+  <span id="toastText"></span>
+  <button id="toastAction" hidden></button>
+</div>
+
+<script>
+'use strict';
+
+// ===========================================================================
+// constants and storage
+// ===========================================================================
+// The default server URL, stamped at BUILD time and not committed: it names the
+// user's own host and this repo is public. CI seds the placeholder below from
+// the TASKMASTER_API_BASE repository secret before `cap sync`
+// (.github/workflows/testflight.yml, "Stamp server configuration"), and
+// scripts/publish_bundle.py stamps the same literal, from the same value, into
+// the COPY of this file that goes into an over-the-air bundle.
+//
+// UNSTAMPED IS A REAL STATE, not a bug: it is what a browser opened on the
+// committed file sees, which is how the UI is developed and screenshotted. Then
+// there is simply no default — Settings says so, store.base stays '' and every
+// caller of it already declines to touch the network (refresh, drain, req).
+// ?server= and a saved value are unaffected, and are what dev uses.
+//
+// The comparison is against '__' rather than the whole literal on purpose: the
+// sed replaces every occurrence of the placeholder in this file, so a second
+// copy of it here would be rewritten too and the test would always be false.
+const API_BASE_STAMP = '__API_BASE__';
+const API_DEFAULT = API_BASE_STAMP.indexOf('__') === 0
+  ? '' : API_BASE_STAMP.replace(/\/+$/, '');
+const REQ_TIMEOUT_MS = 10000;   // one request, start to finish
+const POLL_MS = 30000;          // while visible; a 304 makes this nearly free
+const UNDO_MS = 5000;           // how long "Completed · Undo" stays up
+// The tap-feedback timings. See arm() for the state machine they belong to.
+const GRACE_MS = 1200;          // a tapped row holds its new look, cancellable
+const COLLAPSE_MS = 250;        // and then collapses out over this
+
+const SVG_CHECK = '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+                  '<path d="M7.4 12.3l3 3 6.2-6.6"/></svg>';
+
+// A category name, checked here so a bad one never becomes a queued op that the
+// server drops with a 422 half a minute later. This is the SERVER's rule
+// verbatim -- `clean_project()` in server/app/schemas.py, docs/api.md -- and the
+// two must not drift apart.
+const CAT_RE = /^[A-Za-z0-9_.-]{1,40}$/;
+const CAT_RULE = 'A category can only use letters, numbers and . _ -';
+
+const LS = window.localStorage;
+const K = {
+  base: 'tm.base',        // server URL
+  token: 'tm.token',      // bearer token, '' when unset
+  tasks: 'tm.tasks',      // last server list, status=pending
+  done: 'tm.done',        // last server list, status=completed
+  etag: 'tm.etag',        // ETag of tm.tasks
+  etagDone: 'tm.etag.done',
+  queue: 'tm.queue',      // unsent write ops, in order
+  meta: 'tm.meta',        // last GET /api/meta (projects + tags for the sheet)
+  filter: 'tm.filter',    // the one selected chip: '', 'p:<project>' or 't:<tag>'
+  qaCategory: 'tm.qaCategory', // the category quick-add gives a new task
+  lastSync: 'tm.lastsync' // ISO of the last successful list
+};
+
+// Every localStorage access is wrapped: Safari throws on getItem/setItem in
+// private mode and when the quota is full, and a throw here would take the
+// whole app down on boot. A phone with no storage should still work for the
+// session, just without a cache.
+function lsGet(k, dflt) {
+  try { const v = LS.getItem(k); return v === null ? dflt : v; }
+  catch (e) { return dflt; }
+}
+function lsSet(k, v) { try { LS.setItem(k, v); } catch (e) { /* full or blocked */ } }
+function lsDel(k) { try { LS.removeItem(k); } catch (e) { /* ignore */ } }
+function lsJSON(k, dflt) {
+  try { const v = LS.getItem(k); return v ? JSON.parse(v) : dflt; }
+  catch (e) { return dflt; }
+}
+
+const store = {
+  get base() { return (lsGet(K.base, API_DEFAULT) || '').replace(/\/+$/, ''); },
+  set base(v) {
+    const b = String(v || '').trim().replace(/\/+$/, '');
+    if (b) lsSet(K.base, b); else lsDel(K.base);
+  },
+  get token() { return lsGet(K.token, ''); },
+  set token(v) { const t = String(v || '').trim(); if (t) lsSet(K.token, t); else lsDel(K.token); }
+};
+
+// ---------------------------------------------------------------------------
+// the model
+// ---------------------------------------------------------------------------
+// srvTasks / srvDone are the last thing the SERVER said. queue is what this
+// phone has done since and has not managed to send. What the user sees is
+// project(): the server lists with the queue replayed on top. Keeping those
+// two apart is the whole trick — a refresh can throw the server list away and
+// replace it wholesale without ever losing a tap, and there is no third
+// "optimistic" copy to drift out of sync.
+let srvTasks = lsJSON(K.tasks, []);
+let srvDone = lsJSON(K.done, []);
+let queue = lsJSON(K.queue, []);
+let meta = lsJSON(K.meta, { projects: ['personal', 'work', 'claude', 'fun', 'inbox'], tags: [] });
+let etag = lsGet(K.etag, '');
+let etagDone = lsGet(K.etagDone, '');
+let lastSync = lsGet(K.lastSync, '');
+
+// The one filter (design.md D9). It is a namespaced string because `claude` is
+// BOTH a pa project and a tag, and 'claude' on its own cannot say which chip
+// was tapped. '' is All. It is a preference, not a cache, so "Clear local
+// cache" deliberately leaves it alone -- coming back to a list that is missing
+// most of its tasks with no memory of why is exactly the Taskchamp filter
+// confusion this app was built to end (design.md, top).
+let filter = lsGet(K.filter, '');
+
+// The category the quick-add bar gives a new task, remembered across launches
+// (design.md D13). Like the filter it is a PREFERENCE, not a cache, so "Clear
+// local cache" deliberately leaves it alone: capture is what this app is for,
+// and coming back to it silently filing tasks somewhere else would be worse
+// than any stale list.
+let qaCategory = lsGet(K.qaCategory, '');
+
+let netState = '';        // '', 'offline', 'forbidden', 'unauthorized', 'error'
+let netDetail = '';
+let draining = false;
+let refreshing = false;
+let current = '';         // current screen name
+let sheetUuid = '';       // uuid the sheet is editing, '' when closed
+
+function persistTasks() { lsSet(K.tasks, JSON.stringify(srvTasks)); }
+function persistDone() { lsSet(K.done, JSON.stringify(srvDone)); }
+function persistQueue() { lsSet(K.queue, JSON.stringify(queue)); }
+
+// ===========================================================================
+// small helpers
+// ===========================================================================
+function esc(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function $(id) { return document.getElementById(id); }
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+// ---------------------------------------------------------------------------
+// dates
+// ---------------------------------------------------------------------------
+// `due` from the API is a LOCAL wall-clock string, "YYYY-MM-DD" or
+// "YYYY-MM-DDTHH:MM" (api.md, design.md D3). So today is built from the local
+// fields of a Date and compared as a string.
+//
+// Not toISOString(): that converts to UTC first, and at 19:52 in Chicago
+// new Date().toISOString().slice(0,10) is already TOMORROW. Every evening
+// after 19:00 CDT, every task due today would have jumped into Overdue and
+// tomorrow's would have moved into Today. Lexicographic comparison of
+// "YYYY-MM-DD" is chronological comparison, so plain string < works and no
+// Date instant is ever constructed from a due.
+function todayStr(offset) {
+  const d = new Date();
+  if (offset) d.setDate(d.getDate() + offset);
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+function nowHHMM() {
+  const d = new Date();
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+}
+// "2026-09-05T14:30" -> {date:"2026-09-05", time:"14:30"}; date-only -> time null.
+function dueParts(due) {
+  if (!due) return null;
+  const s = String(due);
+  const i = s.indexOf('T');
+  if (i === -1) return { date: s.slice(0, 10), time: null };
+  return { date: s.slice(0, 10), time: s.slice(i + 1, i + 6) };
+}
+function joinDue(date, time) {
+  if (!date) return null;
+  return time ? (date + 'T' + time) : date;
+}
+// "14:30" -> "2:30 pm"
+function fmtClock(hhmm) {
+  if (!hhmm) return '';
+  const h = parseInt(hhmm.slice(0, 2), 10), m = hhmm.slice(3, 5);
+  const h12 = (h % 12) || 12;
+  return h12 + ':' + m + ' ' + (h < 12 ? 'am' : 'pm');
+}
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// A local calendar date from "YYYY-MM-DD" — built field by field so the
+// browser never reads it as UTC midnight (new Date("2026-09-05") does).
+function dateOf(ymd) {
+  return new Date(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, +ymd.slice(8, 10));
+}
+function fmtDay(ymd, withDow) {
+  const d = dateOf(ymd);
+  const base = (withDow ? DOW[d.getDay()] + ' ' : '') + MON[d.getMonth()] + ' ' + d.getDate();
+  return d.getFullYear() === new Date().getFullYear() ? base : base + ', ' + d.getFullYear();
+}
+// The label on a row. Today shows just the clock; tomorrow says so; anything
+// else is "Thu Sep 4", or "Sep 12 · 2:30 pm" when it is clocked (the weekday
+// is dropped once there is a time, or the line gets too long for one row).
+function dueLabel(due) {
+  const p = dueParts(due);
+  if (!p) return '';
+  const t = todayStr(0);
+  if (p.date === t) return p.time ? fmtClock(p.time) : 'Today';
+  if (p.date === todayStr(1)) return 'Tomorrow' + (p.time ? ' · ' + fmtClock(p.time) : '');
+  return fmtDay(p.date, !p.time) + (p.time ? ' · ' + fmtClock(p.time) : '');
+}
+// ISO instant (entry/end/modified) -> local "Sep 2, 7:41 pm"
+function fmtStamp(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return MON[d.getMonth()] + ' ' + d.getDate() + ', ' +
+         ((d.getHours() % 12) || 12) + ':' + pad2(d.getMinutes()) +
+         ' ' + (d.getHours() < 12 ? 'am' : 'pm');
+}
+function fmtHM(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return ((d.getHours() % 12) || 12) + ':' + pad2(d.getMinutes()) +
+         ' ' + (d.getHours() < 12 ? 'am' : 'pm');
+}
+// Local "YYYY-MM-DD" of an ISO instant — used to group the Done list by day.
+function localDayOf(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+// Which group a pending task belongs in. Overdue is "the date part is before
+// today" OR "it is today and the clock time has already gone past" — a task
+// due at 09:00 is overdue at 09:01, but a date-only task due today is not
+// overdue until tomorrow, because a date-only due means "some time today"
+// (design.md D3).
+function groupOf(t) {
+  const p = dueParts(t.due);
+  if (!p) return 'none';
+  const today = todayStr(0);
+  if (p.date < today) return 'overdue';
+  if (p.date > today) return 'upcoming';
+  return (p.time && p.time <= nowHHMM()) ? 'overdue' : 'today';
+}
+
+// ---------------------------------------------------------------------------
+// the canonical order (design.md D8, docs/api.md "Canonical order")
+// ---------------------------------------------------------------------------
+// ONE key, in ONE function, on purpose. The home-screen widget builds the SAME
+// string in Swift -- ios/App/TaskMasterWidget/TaskMasterWidget.swift, the
+// `sortKey` in rowsFrom() -- and the two implementations MUST be changed
+// together. Two orderings is the bug D8 exists to close: the user tapped the
+// widget and the app listed the same tasks in a different order.
+//
+//   <YYYY-MM-DD>   the due's date part; '' when there is no due
+//   'T'
+//   <HH:MM>        '99:99' for a date-only due, so "some time that day" sorts
+//                  after every clocked due of the same day (design.md D3)
+//   <prio>         '0' H, '1' M, '2' L, '3' none
+//   <uuid>         so the order is TOTAL -- two tasks alike in every field
+//                  above still have one fixed order, and a re-render or a
+//                  refresh cannot swap them under the user's thumb
+//
+// Every field but the last is fixed width, so plain lexicographic comparison
+// of the whole string is the intended order and no Date is ever constructed.
+// The group (overdue/today/upcoming/none) is decided first, by groupOf(); this
+// key orders WITHIN a group. The no-date group leads with urgency instead --
+// there is no date to lead with -- and uses this key only to break ties.
+const PRIO_RANK = { H: '0', M: '1', L: '2' };
+function orderKey(t) {
+  const p = dueParts(t.due);
+  return (p ? p.date : '') + 'T' + ((p && p.time) || '99:99') +
+         (PRIO_RANK[t.priority] || '3') + (t.uuid || '');
+}
+function byOrderKey(a, b) {
+  const ka = orderKey(a), kb = orderKey(b);
+  return ka < kb ? -1 : ka > kb ? 1 : 0;
+}
+
+// ===========================================================================
+// the filter (design.md D9)
+// ===========================================================================
+// No query grammar, no saved filters, nothing premium -- one row of chips and
+// one selection, which is the whole of "how can I filter what's shown?". A
+// filter narrows the SAME grouped list; it never changes the grouping, the
+// order, or what a row does.
+const FILTER_TAGS = ['claude', 'alert'];   // the two tags that mean something downstream
+
+function filterProject() { return filter.indexOf('p:') === 0 ? filter.slice(2) : ''; }
+function filterTag() { return filter.indexOf('t:') === 0 ? filter.slice(2) : ''; }
+// What to call the current filter in a sentence: a project by its name, a tag
+// with the # that tells it apart from the project of the same name.
+function filterName() {
+  if (filterProject()) return filterProject();
+  if (filterTag()) return '#' + filterTag();
+  return '';
+}
+function matchesFilter(t) {
+  const p = filterProject();
+  if (p) return (t.project || '') === p;
+  const g = filterTag();
+  if (g) return (t.tags || []).indexOf(g) >= 0;
+  return true;
+}
+function applyFilter(list) { return filter ? list.filter(matchesFilter) : list; }
+function setFilter(v) {
+  filter = v || '';
+  if (filter) lsSet(K.filter, filter); else lsDel(K.filter);
+  paintQaHint();
+  paintQaCat();     // the chip says what a new task gets, and the filter decides
+  render();
+  window.scrollTo(0, 0);
+}
+
+// ===========================================================================
+// projection: server truth + unsent queue
+// ===========================================================================
+function findIn(list, uuid) {
+  for (let i = 0; i < list.length; i++) if (list[i].uuid === uuid) return i;
+  return -1;
+}
+// Replay the queue over copies of the server lists. This runs on every render,
+// which sounds wasteful and is not: the lists are tens of items and the queue
+// is usually empty. What it buys is that an optimistic write is one array push
+// away from being on screen, and a refresh cannot lose one.
+function project() {
+  const pend = srvTasks.map(t => Object.assign({}, t));
+  const dn = srvDone.map(t => Object.assign({}, t));
+  const pendingIds = {};   // uuids with an unsent op, for the little amber dot
+
+  function take(uuid) {
+    let i = findIn(pend, uuid);
+    if (i >= 0) return pend.splice(i, 1)[0];
+    i = findIn(dn, uuid);
+    if (i >= 0) return dn.splice(i, 1)[0];
+    return null;
+  }
+  function patchInPlace(uuid, fields) {
+    let i = findIn(pend, uuid);
+    if (i >= 0) { pend[i] = Object.assign({}, pend[i], fields); return pend[i]; }
+    i = findIn(dn, uuid);
+    if (i >= 0) { dn[i] = Object.assign({}, dn[i], fields); return dn[i]; }
+    return null;
+  }
+
+  for (const op of queue) {
+    pendingIds[op.uuid] = true;
+    if (op.kind === 'add') {
+      if (findIn(pend, op.uuid) === -1 && findIn(dn, op.uuid) === -1) pend.push(op.task);
+    } else if (op.kind === 'patch') {
+      patchInPlace(op.uuid, op.body);
+    } else if (op.kind === 'done') {
+      const t = take(op.uuid);
+      if (t) { t.status = 'completed'; t.end = op.at; dn.unshift(t); }
+    } else if (op.kind === 'undone') {
+      const t = take(op.uuid);
+      if (t) { t.status = 'pending'; t.end = null; pend.push(t); }
+    } else if (op.kind === 'delete') {
+      take(op.uuid);
+    } else if (op.kind === 'annotate') {
+      const t = patchInPlace(op.uuid, {});
+      if (t) t.annotations = (t.annotations || []).concat([{ entry: op.at, text: op.body.text }]);
+    }
+  }
+  return { pend: pend, done: dn, pendingIds: pendingIds };
+}
+function currentTask(uuid) {
+  const v = project();
+  let i = findIn(v.pend, uuid);
+  if (i >= 0) return v.pend[i];
+  i = findIn(v.done, uuid);
+  if (i >= 0) return v.done[i];
+  return null;
+}
+
+// ===========================================================================
+// the write queue
+// ===========================================================================
+// Why a queue at all: the phone is regularly off the tailnet (no wifi, mobile
+// data, a lift) and "record tasks on phone" has to work there or the app has
+// failed at the one job it was built for. So a write never waits for the
+// network: it goes into the model and into this list, and the drain loop
+// catches up whenever it can.
+//
+// IN ORDER, always. An add followed by a done on the same task must reach the
+// server in that order or the done 404s. That is also why a failure stops the
+// drain instead of skipping ahead.
+function opId() { return 'op-' + Math.random().toString(36).slice(2, 10); }
+function tmpId() { return 'tmp-' + Math.random().toString(36).slice(2, 12); }
+
+function enqueue(op) {
+  op.id = op.id || opId();
+  op.at = op.at || new Date().toISOString();
+  op.tries = 0;
+  queue.push(op);
+  persistQueue();
+  render();
+  // Try immediately; if the phone is offline this fails fast and the pill
+  // turns amber, which is the honest answer.
+  syncNow(true);
+  return op;
+}
+
+// A task added offline has no server uuid yet, so it gets a "tmp-…" one and
+// the row, the sheet and any later edit all address it by that. When the add
+// finally lands the server hands back the real uuid and it has to be swapped
+// in EVERYWHERE at once — in the cached lists and in every op still queued
+// behind it — or a patch/done queued against the temp id would be sent to a
+// uuid the server has never heard of and 404 straight into the bin.
+function rewriteId(tmp, real) {
+  for (const op of queue) if (op.uuid === tmp) op.uuid = real;
+  for (const t of srvTasks) if (t.uuid === tmp) t.uuid = real;
+  for (const t of srvDone) if (t.uuid === tmp) t.uuid = real;
+  if (sheetUuid === tmp) sheetUuid = real;
+  if (flashUuid === tmp) flashUuid = real;
+  persistQueue();
+}
+
+// Fold a task the server just handed back into the cached lists, so the screen
+// is right in the gap between "the op left the queue" and "the next list
+// arrives" instead of flickering the row away and back.
+function mergeServerTask(t) {
+  if (!t || !t.uuid) return;
+  let i = findIn(srvTasks, t.uuid); if (i >= 0) srvTasks.splice(i, 1);
+  i = findIn(srvDone, t.uuid); if (i >= 0) srvDone.splice(i, 1);
+  if (t.status === 'pending' || t.status === 'waiting') srvTasks.push(t);
+  else if (t.status === 'completed') srvDone.unshift(t);
+  persistTasks(); persistDone();
+}
+function forgetTask(uuid) {
+  let i = findIn(srvTasks, uuid); if (i >= 0) srvTasks.splice(i, 1);
+  i = findIn(srvDone, uuid); if (i >= 0) srvDone.splice(i, 1);
+  persistTasks(); persistDone();
+}
+
+function opRequest(op) {
+  switch (op.kind) {
+    case 'add': return req('/api/tasks', { method: 'POST', body: op.body });
+    case 'patch': return req('/api/tasks/' + op.uuid, { method: 'PATCH', body: op.body });
+    case 'done': return req('/api/tasks/' + op.uuid + '/done', { method: 'POST' });
+    case 'undone': return req('/api/tasks/' + op.uuid + '/undone', { method: 'POST' });
+    case 'delete': return req('/api/tasks/' + op.uuid, { method: 'DELETE' });
+    case 'annotate': return req('/api/tasks/' + op.uuid + '/annotations',
+                                { method: 'POST', body: op.body });
+  }
+  return Promise.reject(mkErr(400, 'unknown op ' + op.kind));
+}
+
+async function drain() {
+  if (draining || !queue.length || !store.base) return false;
+  draining = true;
+  let sent = 0;
+  try {
+    while (queue.length) {
+      const op = queue[0];
+      // Defensive: an op still addressed to a temp id means its add was
+      // dropped (a 422, say). Nothing downstream of it can succeed.
+      if (op.kind !== 'add' && String(op.uuid).indexOf('tmp-') === 0) {
+        queue.shift(); persistQueue(); continue;
+      }
+      let res;
+      try {
+        res = await opRequest(op);
+      } catch (err) {
+        if (err.status === 0) {
+          // The request never left the phone. Stop; everything behind this op
+          // depends on it. The pill says how many are waiting and the next
+          // refresh, foreground or 30 s tick tries again.
+          setNet('offline', err.detail);
+          break;
+        }
+        if (err.status >= 400 && err.status < 500) {
+          // The server understood and said no — retrying would say no forever.
+          // Drop it, say why, and let the refresh underneath put the row back
+          // the way the server thinks it is.
+          queue.shift(); persistQueue();
+          toast(describeOp(op) + ': ' + (err.detail || ('HTTP ' + err.status)), { bad: true });
+          if (err.status === 401) setNet('unauthorized', err.detail);
+          if (err.status === 403) setNet('forbidden', err.detail);
+          continue;
+        }
+        // 5xx: usually the `task` CLI failing (502 task_failed). Worth a couple
+        // of retries, but not forever — a permanently angry server must not
+        // wedge every later write behind it.
+        op.tries = (op.tries || 0) + 1;
+        if (op.tries >= 3) {
+          queue.shift(); persistQueue();
+          toast(describeOp(op) + ': ' + (err.detail || ('HTTP ' + err.status)), { bad: true });
+          continue;
+        }
+        persistQueue();
+        setNet('error', err.detail);
+        break;
+      }
+      // Success.
+      if (op.kind === 'add' && res.data && res.data.uuid) {
+        rewriteId(op.uuid, res.data.uuid);
+        mergeServerTask(res.data);
+      } else if (op.kind === 'delete') {
+        forgetTask(op.uuid);
+      } else if (res.data && res.data.uuid) {
+        mergeServerTask(res.data);
+      }
+      queue.shift(); persistQueue();
+      sent++;
+      setNet('', '');
+      render();
+    }
+  } finally {
+    draining = false;
+  }
+  return sent > 0;
+}
+function describeOp(op) {
+  return { add: 'Add failed', patch: 'Save failed', done: 'Complete failed',
+           undone: 'Un-complete failed', delete: 'Delete failed',
+           annotate: 'Note failed' }[op.kind] || 'Change failed';
+}
+
+// ===========================================================================
+// requests
+// ===========================================================================
+function mkErr(status, detail, code) {
+  const e = new Error(detail || ('HTTP ' + status));
+  e.status = status; e.detail = detail || ('HTTP ' + status); e.code = code || null;
+  return e;
+}
+// One call shape for the whole contract. Resolves {status, data, etag};
+// rejects with err.status === 0 when the request never reached the server,
+// which is a different problem from "the server said no" and is worth naming
+// separately in the status pill.
+function req(path, opts) {
+  opts = opts || {};
+  const base = store.base;
+  if (!base) return Promise.reject(mkErr(0, 'No server URL set — open Settings.'));
+
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), REQ_TIMEOUT_MS);
+  const headers = { 'Accept': 'application/json' };
+  // Only when a token is actually configured: sending an empty bearer to a
+  // server with no TASKMASTER_TOKEN is a needless preflight and a needless 401.
+  if (store.token) headers['Authorization'] = 'Bearer ' + store.token;
+  if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (opts.etag) headers['If-None-Match'] = opts.etag;
+
+  return fetch(base + path, {
+    method: opts.method || (opts.body !== undefined ? 'POST' : 'GET'),
+    headers: headers,
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    signal: ctl.signal,
+    cache: 'no-store'
+  }).then(r => {
+    if (r.status === 304) return { status: 304, data: null, etag: r.headers.get('ETag') || opts.etag };
+    return r.text().then(text => {
+      let j = null;
+      if (text) { try { j = JSON.parse(text); } catch (e) { j = null; } }
+      if (!r.ok) {
+        throw mkErr(r.status, (j && (j.detail || j.error)) || ('HTTP ' + r.status),
+                    j && j.error);
+      }
+      return { status: r.status, data: j, etag: r.headers.get('ETag') || '' };
+    });
+  }, err => {
+    // fetch rejects with a TypeError when the request never left (DNS, no
+    // route, connection refused, blocked by ATS) and an AbortError on our own
+    // timeout. Both are "offline" as far as this app is concerned.
+    const timedOut = err && err.name === 'AbortError';
+    throw mkErr(0, timedOut
+      ? ('No answer from ' + base + ' within 10 s.')
+      : ('Cannot reach ' + base + ' — is the phone on the tailnet?'));
+  }).finally(() => clearTimeout(timer));
+}
+
+function setNet(state, detail) {
+  netState = state || '';
+  netDetail = detail || '';
+  paintStatus();
+}
+
+// ===========================================================================
+// refresh
+// ===========================================================================
+// The server list wins: it replaces srvTasks wholesale, and project() puts
+// whatever has not been sent back on top of it. Nothing is merged field by
+// field, so there is no way for a stale local row to survive a refresh.
+async function refresh(quiet) {
+  if (refreshing || !store.base) { paintStatus(); return; }
+  refreshing = true;
+  $('btnRefresh').classList.add('spin');
+  try {
+    const r = await req('/api/tasks?status=pending', { etag: etag || undefined });
+    if (r.status === 200) {
+      srvTasks = Array.isArray(r.data) ? r.data : [];
+      etag = r.etag || ''; lsSet(K.etag, etag);
+      persistTasks();
+    }
+    // 304 means "unchanged" — keep the cache, and still count it as a sync.
+    lastSync = new Date().toISOString(); lsSet(K.lastSync, lastSync);
+    setNet('', '');
+
+    // The Done list is only worth a round trip when it is on screen (or has
+    // never been fetched). It changes rarely and the 30 s poll should stay one
+    // request, not two.
+    if (current === 'done' || !srvDone.length) {
+      try {
+        const d = await req('/api/tasks?status=completed', { etag: etagDone || undefined });
+        if (d.status === 200) {
+          srvDone = Array.isArray(d.data) ? d.data : [];
+          etagDone = d.etag || ''; lsSet(K.etagDone, etagDone);
+          persistDone();
+        }
+      } catch (e) { /* the pending list is the one that matters */ }
+    }
+    render();
+  } catch (err) {
+    if (err.status === 0) setNet('offline', err.detail);
+    else if (err.status === 403) setNet('forbidden', err.detail);
+    else if (err.status === 401) setNet('unauthorized', err.detail);
+    else setNet('error', err.detail);
+    if (!quiet) toast(err.detail, { bad: true });
+    paintStatus();
+  } finally {
+    refreshing = false;
+    $('btnRefresh').classList.remove('spin');
+  }
+}
+
+// Send first, then read. Doing it the other way round would pull a list that
+// does not yet contain the thing you just typed and flash it off the screen.
+async function syncNow(quiet) {
+  await drain();
+  await refresh(quiet);
+}
+
+async function loadMeta() {
+  try {
+    const r = await req('/api/meta');
+    if (r.data) { meta = r.data; lsSet(K.meta, JSON.stringify(meta)); }
+  } catch (e) { /* the sheet falls back to the cached/default project list */ }
+}
+
+// ===========================================================================
+// toast
+// ===========================================================================
+let toastTimer = null;
+function toast(msg, opts) {
+  opts = opts || {};
+  const el = $('toast'), act = $('toastAction');
+  $('toastText').textContent = String(msg || '');
+  el.className = opts.bad ? 'bad' : '';
+  if (opts.actionLabel) {
+    act.textContent = opts.actionLabel;
+    act.hidden = false;
+    act.onclick = () => { el.hidden = true; if (opts.action) opts.action(); };
+  } else {
+    act.hidden = true; act.onclick = null;
+  }
+  el.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, opts.ms || (opts.bad ? 6000 : 3200));
+}
+$('toastText').onclick = function () { $('toast').hidden = true; };
+
+// ===========================================================================
+// rendering
+// ===========================================================================
+function priorityBadge(p) {
+  if (!p) return '';
+  return '<span class="badge ' + esc(p) + '">' + esc(p) + '</span>';
+}
+function tagChips(tags) {
+  return (tags || []).map(t => {
+    const known = (t === 'claude' || t === 'alert') ? ' ' + t : '';
+    return '<span class="tagchip' + known + '">' + esc(t) + '</span>';
+  }).join('');
+}
+function metaLine(t, opts) {
+  opts = opts || {};
+  const bits = [];
+  if (t.project) bits.push('<span>' + esc(t.project) + '</span>');
+  // The Done tab hides the due entirely: a finished task shown in red because
+  // it was late is noise, and next to the completion time two clock values on
+  // one row read as a contradiction.
+  if (t.due && !opts.hideDue) {
+    const g = groupOf(t);
+    const cls = g === 'overdue' ? ' od' : (g === 'today' ? ' now' : '');
+    bits.push('<span class="due' + cls + '">' + esc(dueLabel(t.due)) + '</span>');
+  }
+  if (opts.endLabel) bits.push('<span>' + esc(opts.endLabel) + '</span>');
+  const tail = [];
+  if (t.priority) tail.push(priorityBadge(t.priority));
+  if (t.tags && t.tags.length) tail.push(tagChips(t.tags));
+  if (t.blocked) tail.push('<span class="tagchip blocked">blocked</span>');
+  if (t.annotations && t.annotations.length) {
+    tail.push('<span class="tagchip">' + t.annotations.length + ' note' +
+              (t.annotations.length > 1 ? 's' : '') + '</span>');
+  }
+  // Inline, not on its own line: a queued write is the normal state of things
+  // when the phone is off the tailnet and it should not make every row taller.
+  if (opts.waiting) {
+    tail.push('<span class="pendingdot"></span><span>waiting to send</span>');
+  }
+  const left = bits.join('<span class="sep">·</span>');
+  if (!left && !tail.length) return '';
+  return '<div class="meta">' + left + tail.join('') + '</div>';
+}
+// An upstream (pa, or anything else writing to the same Taskwarrior) can stage
+// a pending task tagged `button` to give the phone a one-tap way to trigger
+// something. Completing one is not an ordinary tick: it acts the moment it is
+// completed, and the effect lands downstream where the app cannot take it back.
+//
+// The tag is the whole contract -- no description matching. Upstream text is
+// free-form and gets reworded, and a reword that silently turned one of these
+// back into an ordinary row with a one-tap circle is precisely the accident
+// this exists to prevent (2026-09-04); a tag is the one thing upstream states
+// deliberately.
+function isButtonRow(t) {
+  if (!t || t.status === 'completed') return false;
+  return (t.tags || []).indexOf('button') >= 0;
+}
+// No circle anywhere on this row, so there is nothing on it that looks like
+// the thing every other row does. The description stays (dimmed) because it is
+// still a task and it still has to be identifiable in a list; the body opens
+// the sheet exactly as it does everywhere else, so editing and deleting are
+// unchanged.
+function buttonRow(t, opts) {
+  return '' +
+    '<div class="task buttonrow" data-uuid="' + esc(t.uuid) + '">' +
+      '<button class="taskbody" data-act="open">' +
+        '<div class="desc">' + esc(t.description) + '</div>' +
+        metaLine(t, opts) +
+      '</button>' +
+      '<button class="buttonpill" data-act="button">Tap to confirm</button>' +
+    '</div>';
+}
+
+function taskRow(t, opts) {
+  opts = opts || {};
+  if (isButtonRow(t)) return buttonRow(t, opts);
+  const done = t.status === 'completed';
+  // The ↻ says "this is one instance of a repeating task": completing it is
+  // normal, and Taskwarrior spawns the next one server-side (api.md).
+  const rec = t.parent ? '<span class="recur" aria-label="repeating">↻ </span>' : '';
+  // "Reopen", not "Un-complete": it is what the row does, it is what the toast
+  // after it says, and arm() only has to swap the verb for the cancel label.
+  return '' +
+    '<div class="task' + (done ? ' gone' : '') +
+      (t.uuid === flashUuid ? ' justadded' : '') +
+      '" data-uuid="' + esc(t.uuid) + '">' +
+      '<button class="check' + (done ? ' on' : '') + '" data-act="' +
+        (done ? 'undone' : 'done') + '" ' +
+        'aria-label="' + (done ? 'Reopen ' : 'Complete ') + esc(t.description) + '">' +
+        '<i>' + SVG_CHECK + '</i>' +
+      '</button>' +
+      '<button class="taskbody" data-act="open">' +
+        '<div class="desc">' + rec + esc(t.description) + '</div>' +
+        metaLine(t, opts) +
+      '</button>' +
+    '</div>';
+}
+
+// The chips are built from every pending task, not from the filtered ones --
+// they are how you get back out of a filter, so they cannot depend on it.
+let filterBarPainted = null;   // the filter the bar was last scrolled for
+let filterBarHTML = '';        // what is already in the DOM; see below
+function renderFilterBar(all) {
+  const counts = {};
+  const seen = [];
+  for (const t of all) {
+    if (t.project) {
+      if (seen.indexOf(t.project) === -1) seen.push(t.project);
+      counts['p:' + t.project] = (counts['p:' + t.project] || 0) + 1;
+    }
+    for (const g of (t.tags || [])) counts['t:' + g] = (counts['t:' + g] || 0) + 1;
+  }
+  // pa's five first and in pa's order (api.md /api/meta), then any other
+  // project this list actually uses, alphabetically. A project with no pending
+  // task gets no chip at all: an empty chip is noise, and a row of them is the
+  // filter confusion this app replaced.
+  const projects = [];
+  for (const p of (meta.projects || [])) {
+    if (seen.indexOf(p) >= 0 && projects.indexOf(p) === -1) projects.push(p);
+  }
+  for (const p of seen.slice().sort()) if (projects.indexOf(p) === -1) projects.push(p);
+
+  const chips = [['', 'All', all.length, false]];
+  for (const p of projects) chips.push(['p:' + p, p, counts['p:' + p], false]);
+  for (const g of FILTER_TAGS) if (counts['t:' + g]) chips.push(['t:' + g, g, counts['t:' + g], true]);
+  // The selected chip keeps its place even when its last task has just left,
+  // showing 0. Dropping it would leave "Nothing in work" on screen with
+  // nothing anywhere saying why and no chip to tap to undo it.
+  if (filter && !chips.some(c => c[0] === filter)) {
+    chips.push([filter, filterProject() || filterTag(), 0, !!filterTag()]);
+  }
+
+  // Only the SELECTED chip carries a count. Eight numbers in a row is a
+  // dashboard; one is an answer to "how many are in here".
+  const html = chips.map(c => {
+    const on = c[0] === filter;
+    return '<button class="fchip' + (on ? ' on' : '') + '" data-f="' + esc(c[0]) + '"' +
+      ' aria-pressed="' + (on ? 'true' : 'false') + '">' +
+      '<span>' + (c[3] ? '<span class="h">#</span>' : '') + esc(c[1]) + '</span>' +
+      (on ? '<span class="fn">' + esc(c[2]) + '</span>' : '') +
+      '</button>';
+  }).join('');
+
+  // Written ONLY when it actually differs. render() runs on the 30 s poll, and
+  // rewriting this innerHTML resets the bar's horizontal scroll to 0 -- so
+  // scrolling right to reach a chip and then waiting half a minute would snap
+  // the row back under your thumb. It also drops keyboard focus.
+  if (html !== filterBarHTML) {
+    filterBarHTML = html;
+    $('filterbar').innerHTML = html;
+  }
+
+  // Scroll the selection into view when it CHANGES, and only then: doing it on
+  // every render would drag the bar back under the thumb of someone scrolling
+  // through the chips, every 30 seconds.
+  if (filterBarPainted !== filter) {
+    filterBarPainted = filter;
+    const bar = $('filterbar'), on = bar.querySelector('.fchip.on');
+    if (on) {
+      const l = on.offsetLeft, r = l + on.offsetWidth;
+      if (l < bar.scrollLeft || r > bar.scrollLeft + bar.clientWidth) {
+        bar.scrollLeft = Math.max(0, l - 16);
+      }
+    }
+  }
+}
+
+function renderTasks(view, vis) {
+  renderFilterBar(view.pend);
+
+  const groups = { overdue: [], today: [], upcoming: [], none: [] };
+  for (const t of vis) groups[groupOf(t)].push(t);
+  // The canonical order, and nothing else decides it. See orderKey().
+  groups.overdue.sort(byOrderKey);
+  groups.today.sort(byOrderKey);
+  groups.upcoming.sort(byOrderKey);
+  // No date has no date to lead with, so urgency leads and the key breaks the
+  // ties -- which is what stops two equally urgent undated tasks trading
+  // places between renders (api.md "Canonical order", 3).
+  groups.none.sort((a, b) => ((b.urgency || 0) - (a.urgency || 0)) || byOrderKey(a, b));
+
+  const order = [['overdue', 'Overdue', 'od'], ['today', 'Today', ''],
+                 ['upcoming', 'Upcoming', ''], ['none', 'No date', '']];
+  const html = [];
+  for (const [key, label, cls] of order) {
+    const rows = groups[key];
+    if (!rows.length) continue;      // an empty group is not a heading
+    html.push('<h2 class="group ' + cls + '">' + label +
+              '<span class="n">' + rows.length + '</span></h2>');
+    html.push('<div class="list">' +
+      rows.map(t => taskRow(t, { waiting: !!view.pendingIds[t.uuid] })).join('') +
+      '</div>');
+  }
+  $('groups').innerHTML = html.join('');
+
+  const empty = $('tasksEmpty');
+  empty.hidden = vis.length > 0;
+  if (!vis.length) {
+    // Name the thing the way the chip named it: "the work category" for a
+    // category chip, "#claude" for a tag one, which is not a category and must
+    // not be called one.
+    const what = filterProject()
+      ? 'the ' + esc(filterProject()) + ' category'
+      : esc(filterName());
+    empty.innerHTML = filter
+      ? 'Nothing in ' + what + '.' +
+        '<div class="hint">Tap <b>All</b> above to see every task.</div>'
+      : 'Nothing pending. Everything you have is done — add the next thing below.';
+  }
+}
+
+function renderDone(view) {
+  const today = todayStr(0), yest = todayStr(-1);
+  const buckets = [];   // [{key,label,rows}] in order, newest first
+  const byKey = {};
+  for (const t of view.done) {
+    const day = localDayOf(t.end) || 'unknown';
+    if (!byKey[day]) {
+      const label = day === today ? 'Today'
+                  : day === yest ? 'Yesterday'
+                  : (day === 'unknown' ? 'Earlier' : fmtDay(day, true));
+      byKey[day] = { key: day, label: label, rows: [] };
+      buckets.push(byKey[day]);
+    }
+    byKey[day].rows.push(t);
+  }
+  const html = [];
+  for (const b of buckets) {
+    html.push('<h2 class="group">' + esc(b.label) +
+              '<span class="n">' + b.rows.length + '</span></h2>');
+    html.push('<div class="list">' + b.rows.map(t => taskRow(t, {
+      hideDue: true,
+      endLabel: t.end ? ('done ' + fmtHM(t.end)) : '',
+      waiting: !!view.pendingIds[t.uuid]
+    })).join('') + '</div>');
+  }
+  $('doneGroups').innerHTML = html.join('');
+  $('doneEmpty').hidden = view.done.length > 0;
+}
+
+function paintStatus() {
+  const dot = $('dot'), txt = $('statusText'), pill = $('statusPill');
+  let cls = '', d = '', text = '';
+  if (!store.base) { cls = 'bad'; d = 'bad'; text = 'no server'; }
+  else if (queue.length) {
+    cls = 'warn'; d = 'warn';
+    text = queue.length + ' change' + (queue.length > 1 ? 's' : '') + ' waiting';
+  } else if (netState === 'offline') { cls = 'bad'; d = 'bad'; text = 'offline'; }
+  else if (netState === 'forbidden') { cls = 'bad'; d = 'bad'; text = 'not on the tailnet'; }
+  else if (netState === 'unauthorized') { cls = 'bad'; d = 'bad'; text = 'token rejected'; }
+  else if (netState === 'error') { cls = 'bad'; d = 'bad'; text = 'server error'; }
+  else if (lastSync) { d = 'ok'; text = 'synced ' + fmtHM(lastSync); }
+  else { text = 'not synced'; }
+  pill.className = 'statusbtn' + (cls ? ' ' + cls : '');
+  dot.className = 'dot' + (d ? ' ' + d : '');
+  txt.textContent = text;
+  pill.title = netDetail || text;
+}
+
+// render() rebuilds the list's innerHTML, which would tear a completing row
+// out from under its own animation — and on a fast server the drain answers in
+// 20 ms, so the row would blink rather than strike out. renderHold lets an
+// animation reserve a few hundred ms; renders that arrive inside it wait
+// instead of being lost.
+let renderHold = 0;
+let renderHoldTimer = null;
+// Monotonic on purpose: two things can be animating at once (a row waiting out
+// its 1.2 s grace and a button row's 340 ms strike-out), and the shorter of
+// them must not end the longer one's hold and rebuild the list underneath it.
+function holdRender(ms) { renderHold = Math.max(renderHold, Date.now() + ms); }
+
+function render() {
+  if (Date.now() < renderHold) {
+    if (!renderHoldTimer) {
+      renderHoldTimer = setTimeout(() => { renderHoldTimer = null; render(); },
+                                   renderHold - Date.now() + 20);
+    }
+    paintStatus();      // the pill is outside the list and safe to update
+    return;
+  }
+  const view = project();
+  // The filtered list, once: the list, the empty state and the header count
+  // all have to agree, and a header that counts tasks the screen is not
+  // showing is the same lie as a filter that hides one without saying so.
+  const vis = applyFilter(view.pend);
+  if (current === 'tasks') renderTasks(view, vis);
+  if (current === 'done') renderDone(view);
+  if (current === 'settings') renderSettings(view);
+
+  const n = vis.length;
+  $('headSub').textContent =
+    current === 'done' ? (view.done.length + ' completed · last 30 days')
+    : current === 'settings' ? 'Settings'
+    : ((n === 1 ? '1 task' : n + ' tasks') + (filter ? ' in ' + filterName() : ''));
+  paintStatus();
+  measureBars();
+}
+
+function renderSettings(view) {
+  paintBuildInfo();
+  $('setLastSync').textContent = lastSync ? fmtStamp(lastSync) : 'never';
+  $('setCounts').textContent = (view.pend.length + ' pending · ' +
+                                view.done.length + ' done');
+  $('setQueue').textContent = String(queue.length);
+  $('setRetry').disabled = !queue.length;
+}
+
+// The two fixed bars are the only things between the list and the bottom of
+// the screen, and the quick-add one changes height when the date picker row
+// opens. Measure rather than guess, or the last row hides under it.
+function measureBars() {
+  const qa = $('quickadd');
+  const h = qa.hidden ? 0 : qa.offsetHeight;
+  document.documentElement.style.setProperty('--qah', h + 'px');
+}
+
+// ===========================================================================
+// actions
+// ===========================================================================
+// ---------------------------------------------------------------------------
+// tapping a row: the grace period
+// ---------------------------------------------------------------------------
+// The home-screen widget ticks the box the instant it is tapped, keeps the row
+// for a few seconds during which a second tap takes it back, and only then
+// removes it. The user asked for that feel here, on BOTH tabs -- the Done tab's
+// un-complete had no feedback at all. One state machine serves both:
+//
+//        tap on the circle
+//   resting -----------------> ARMED           <- looks like the state it is
+//      ^                        |  |              heading for; NOTHING queued,
+//      |     tap again          |  |              nothing sent, no toast
+//      +------------------------+  | GRACE_MS elapses (1200 ms)
+//         (nothing to undo,        v
+//          because nothing        COLLAPSING (250 ms) -- the row's height and
+//          ever left)              opacity go to zero, the op is queued, and
+//                                  the 5 s "Undo" toast goes up
+//
+// The op is queued at the END of the grace, not at the tap, and that is the
+// point rather than an implementation detail: a wrong tap that is caught in
+// time NEVER REACHES THE SERVER. The alternative -- fire at the tap, cancel by
+// queueing the opposite -- would put a done/undone pair on the wire for a
+// mistake the user corrected in under a second, and each of those runs the
+// Taskwarrior hooks on the server (design.md D1).
+//
+// After the grace it is the queue's problem again and nothing about it changed:
+// the Undo toast still tears the op up if it is still queued and still asks the
+// server for the opposite if it has already gone (undoComplete below).
+//
+// Timings: the circle's fill/empty bounce is 150 ms of CSS (.check.pop), the
+// grace is GRACE_MS, the collapse is COLLAPSE_MS, the toast is UNDO_MS. Under
+// prefers-reduced-motion the two animations go and the three timings stay --
+// see the media query at the bottom of the stylesheet.
+const armed = Object.create(null);   // uuid -> { kind, desc, timer }
+
+function isArmed(uuid) { return !!armed[uuid]; }
+function anyArmed() { return Object.keys(armed).length > 0; }
+function rowEl(uuid) { return document.querySelector('.task[data-uuid="' + uuid + '"]'); }
+function reduceMotion() {
+  try {
+    return !!(window.matchMedia &&
+              window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch (e) { return false; }
+}
+
+// The circle, repainted in place. It has to be done by hand rather than by a
+// render: during the grace the model has not moved -- that is the whole idea --
+// so a render would paint the resting state straight back. Three things differ,
+// and the third is the one that is easy to forget: the fill, what the next tap
+// means, and what a screen reader is told the next tap means.
+function paintCheck(row, kind, nowArmed, desc) {
+  const c = row.querySelector('.check');
+  if (!c) return;
+  const isDone = kind === 'done';
+  // Armed to complete = filled; armed to reopen = empty. Resting is whichever
+  // the row's own status already is, which is the other one of the pair.
+  c.classList.toggle('on', nowArmed ? isDone : !isDone);
+  c.setAttribute('data-act', nowArmed ? 'cancel' : kind);
+  c.setAttribute('aria-label',
+    (nowArmed ? (isDone ? 'Cancel completing ' : 'Cancel reopening ')
+              : (isDone ? 'Complete ' : 'Reopen ')) + (desc || ''));
+  // Re-trigger the bounce on both edges -- filling and emptying are equally
+  // worth acknowledging, and a class that is already on the element does not
+  // animate again, hence the remove/reflow/add.
+  c.classList.remove('pop');
+  void c.offsetWidth;
+  if (!reduceMotion()) c.classList.add('pop');
+}
+
+function arm(uuid, kind) {
+  if (isArmed(uuid)) { cancelArm(uuid); return; }   // the second tap IS the cancel
+  const t = currentTask(uuid);
+  if (!t) return;
+  const row = rowEl(uuid);
+  if (!row) {
+    // No row to hold open and no circle to tap again, so a grace here would be
+    // a delay with no way to use it. Send it the way the app always did.
+    if (kind === 'done') sendDone(uuid); else sendUndone(uuid);
+    return;
+  }
+  row.classList.add(kind === 'done' ? 'arm-done' : 'arm-undone');
+  paintCheck(row, kind, true, t.description);
+  armed[uuid] = { kind: kind, desc: t.description,
+                  timer: setTimeout(() => commitArm(uuid), GRACE_MS) };
+  // Nothing was queued, so the model did not change -- but the 30 s poll, a
+  // drain and a refresh all call render() anyway, and a rebuilt list throws the
+  // armed row's DOM away mid-grace. Hold the whole sequence, grace and collapse.
+  holdRender(GRACE_MS + COLLAPSE_MS + 80);
+}
+
+// Nothing was queued and nothing was sent, so there is nothing to undo, nothing
+// to tell the server and nothing to say in a toast: the row going back to how
+// it was IS the answer to the tap.
+function cancelArm(uuid) {
+  const st = armed[uuid];
+  if (!st) return;
+  clearTimeout(st.timer);
+  delete armed[uuid];
+  const row = rowEl(uuid);
+  if (row) {
+    row.classList.remove('arm-done', 'arm-undone');
+    paintCheck(row, st.kind, false, st.desc);
+  }
+  // Let renders through again: a cancelled row must not leave the list frozen
+  // for the rest of a grace that is no longer running -- the next thing the
+  // user does (an Add, most likely) has to appear at once. But not for another
+  // 170 ms, or the render below rebuilds the row's DOM and takes the bounce
+  // that acknowledges the cancel away with it.
+  if (!anyArmed()) renderHold = 0;
+  holdRender(reduceMotion() ? 0 : 170);
+  render();
+}
+
+// The grace ran out: NOW it is a write.
+function commitArm(uuid) {
+  const st = armed[uuid];
+  if (!st) return;
+  clearTimeout(st.timer);
+  delete armed[uuid];
+  const ms = reduceMotion() ? 0 : COLLAPSE_MS;
+  // Hold before enqueue, not after: enqueue() renders, and a render here would
+  // delete the row out from under its own collapse.
+  holdRender(ms + 80);
+  const row = rowEl(uuid);
+  if (row) collapseRow(row, ms);
+  if (st.kind === 'done') sendDone(uuid); else sendUndone(uuid);
+}
+
+// A flex row has no height of its own for a transition to start from, so take
+// the height it is currently painted at, pin it, and go to zero on the next
+// frame. The bottom border goes with it, or the list keeps a 1px rule where the
+// row used to be for the whole 250 ms.
+function collapseRow(row, ms) {
+  row.style.height = row.offsetHeight + 'px';
+  row.classList.add('collapsing');
+  const shut = () => {
+    row.style.height = '0px';
+    row.style.opacity = '0';
+    row.style.borderBottomWidth = '0px';
+  };
+  if (!ms) { shut(); return; }
+  void row.offsetHeight;              // make the browser take the pinned height
+  requestAnimationFrame(shut);
+  // rAF does not run in a backgrounded tab, and flushArmed() commits from
+  // exactly there (visibilitychange). Setting the same values twice does not
+  // restart a transition, so this is free when the frame did arrive.
+  setTimeout(shut, 60);
+}
+
+// Leaving the screen commits every armed row at once. A grace timer firing
+// against a list that is no longer on screen is at best invisible, and a
+// navigation that silently cancelled it would be a tap that did nothing.
+function flushArmed() {
+  for (const uuid of Object.keys(armed)) commitArm(uuid);
+}
+
+function sendDone(uuid) {
+  const op = enqueue({ kind: 'done', uuid: uuid });
+  toast('Completed', {
+    actionLabel: 'Undo', ms: UNDO_MS,
+    action: () => undoComplete(op, uuid)
+  });
+}
+function sendUndone(uuid) {
+  const op = enqueue({ kind: 'undone', uuid: uuid });
+  toast('Moved back to Tasks', {
+    actionLabel: 'Undo', ms: UNDO_MS,
+    action: () => undoUncomplete(op, uuid)
+  });
+}
+
+// ---------------------------------------------------------------------------
+// the two things a row's circle does
+// ---------------------------------------------------------------------------
+function completeTask(uuid, opts) {
+  if (opts && opts.immediate) { completeNow(uuid); return; }
+  arm(uuid, 'done');
+}
+function uncompleteTask(uuid) { arm(uuid, 'undone'); }
+
+// The pre-grace path, kept for exactly one caller: a `button` row. It has just
+// answered a confirm dialog naming the task -- that is its grace period, and a
+// better one -- and it has no circle to tap a second time, so an armed state
+// there would be 1.2 s in which nothing can be done about it.
+function completeNow(uuid) {
+  const t = currentTask(uuid);
+  if (!t) return;
+  // Acknowledge the tap in the DOM before the model moves, then hold the
+  // re-render open long enough for the strike-and-fade to play.
+  const row = rowEl(uuid);
+  if (row) {
+    if (row.classList.contains('completing')) return;   // double tap
+    row.classList.add('completing');
+    const c = row.querySelector('.check');
+    if (c) c.classList.add('on');
+    holdRender(340);
+  }
+  sendDone(uuid);
+}
+
+// Undo has two shapes and picking the wrong one is how you get a task that
+// comes back and then completes itself again a second later. If the done op is
+// still sitting in the queue nothing has happened on the server yet, so just
+// tear the op up. If it has already gone, the only way back is to ask.
+function undoComplete(op, uuid) {
+  const i = queue.findIndex(o => o.id === op.id);
+  if (i >= 0) {
+    queue.splice(i, 1); persistQueue(); render();
+    toast('Undone');
+    return;
+  }
+  enqueue({ kind: 'undone', uuid: uuid });
+  toast('Undone');
+}
+// The mirror, for the Done tab, with the same two shapes for the same reason.
+function undoUncomplete(op, uuid) {
+  const i = queue.findIndex(o => o.id === op.id);
+  if (i >= 0) {
+    queue.splice(i, 1); persistQueue(); render();
+    toast('Back in Done');
+    return;
+  }
+  enqueue({ kind: 'done', uuid: uuid });
+  toast('Back in Done');
+}
+// The one tap in this app that means more than it says: completing a `button`
+// task fires whatever it is wired to (see isButtonRow). Ask first -- naming the
+// task, because the pill says the same words on every one of them -- then fall
+// straight into the ordinary complete path, so the strike-out, the 5 s Undo,
+// the offline queue and the server call are all the same code as every other
+// row: a second path to "complete" is a second path to get wrong.
+//
+// `immediate` skips the grace period, and only because the confirm dialog IS
+// one: it named the task and it was answered, which is a stronger cancel than
+// tapping a circle again, and this row has no circle to tap. Everything after
+// the decision -- queue, request, toast, Undo -- is still the same code.
+function buttonTap(uuid) {
+  const t = currentTask(uuid);
+  if (!t) return;
+  if (!window.confirm('Complete "' + t.description +
+                      '"? Button tasks act the moment they are completed.')) return;
+  completeTask(uuid, { immediate: true });
+}
+
+// ---- quick add ------------------------------------------------------------
+// A tap on Add is answered three ways: the button presses (#qaAdd:active), the
+// field clears, and the row that appears is washed with --flash for ~0.9 s so
+// the eye is told WHERE it went. That last one matters most on this screen --
+// the new row is somewhere up the list, above the keyboard, and "did that
+// work?" is otherwise answered by hunting for it.
+//
+// No render is forced to take the class off again: the animation is over long
+// before the next render, and forcing one would restart it.
+let flashUuid = '';
+let flashTimer = null;
+function flashRow(uuid) {
+  flashUuid = uuid;
+  if (flashTimer) clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { flashUuid = ''; flashTimer = null; }, 1000);
+}
+
+// The chip cycles rather than opening a menu: four states, one thumb, no modal
+// between the user and having typed the thing down.
+const DUE_STATES = ['none', 'today', 'tomorrow', 'pick'];
+let qaDueState = 'none';
+let qaPickedDate = '';
+
+function qaDueValue() {
+  if (qaDueState === 'today') return todayStr(0);
+  if (qaDueState === 'tomorrow') return todayStr(1);
+  if (qaDueState === 'pick') return qaPickedDate || null;
+  return null;
+}
+function paintQaDue() {
+  const chip = $('qaDue');
+  let label = 'No date';
+  if (qaDueState === 'today') label = 'Today';
+  else if (qaDueState === 'tomorrow') label = 'Tomorrow';
+  else if (qaDueState === 'pick') label = qaPickedDate ? fmtDay(qaPickedDate, false) : 'Pick date';
+  chip.textContent = label;
+  chip.className = 'chip qachip' + (qaDueValue() ? ' set' : '');
+  $('qaPickRow').hidden = qaDueState !== 'pick';
+  measureBars();
+}
+function cycleQaDue() {
+  const i = DUE_STATES.indexOf(qaDueState);
+  qaDueState = DUE_STATES[(i + 1) % DUE_STATES.length];
+  if (qaDueState !== 'pick') qaPickedDate = '';
+  paintQaDue();
+  if (qaDueState === 'pick') {
+    const d = $('qaDate');
+    d.value = qaPickedDate || todayStr(0);
+    qaPickedDate = d.value;
+    paintQaDue();
+    // showPicker() is the nice path on iOS 16+/Chrome; where it is missing the
+    // input is visible anyway, which is why the row exists rather than a
+    // hidden input.
+    try { if (d.showPicker) d.showPicker(); else d.focus(); } catch (e) { d.focus(); }
+  }
+}
+
+// ---- categories (design.md D13) -------------------------------------------
+// A "category" is Taskwarrior's `project`, and it stays `project` in the model,
+// in the API and in every identifier here. The word changes at the glass only,
+// because "category" is what the user asked for and what the thing is: one
+// name, chosen from a list, that says where a task belongs.
+//
+// ONE list, built here, used by both places that offer it -- the quick-add chip
+// and the detail sheet -- so the two can never present different sets. Order is
+// /api/meta's (the five `pa` categories first, in pa's order, then every other
+// one the server has seen: docs/api.md), then anything a task on this phone is
+// using that the server has not heard of yet, which is what an offline-added
+// task with a brand new category is until it lands.
+function categoryList(extra) {
+  const out = (meta.projects || []).slice();
+  const v = project();
+  const local = [];
+  for (const t of v.pend.concat(v.done)) {
+    const p = t.project;
+    if (p && out.indexOf(p) === -1 && local.indexOf(p) === -1) local.push(p);
+  }
+  local.sort();
+  for (const p of local) out.push(p);
+  // The one currently chosen always appears, even if nothing else uses it: a
+  // list that cannot show you your own selection is not a list of choices.
+  if (extra && out.indexOf(extra) === -1) out.push(extra);
+  return out;
+}
+
+// What a new task will ACTUALLY get. A project filter chip wins over the sticky
+// choice, and has since D9: adding a task inside a filter and having it vanish
+// from the list you are looking at is indistinguishable from a bug.
+function qaCategoryValue() { return filterProject() || qaCategory; }
+
+function paintQaCat() {
+  const chip = $('qaCat');
+  const v = qaCategoryValue();
+  chip.textContent = v || 'Category';
+  chip.className = 'chip qachip' + (v ? ' set' : '');
+  chip.setAttribute('aria-label', v
+    ? 'Category for new tasks: ' + v + '. Tap to change.'
+    : 'No category for new tasks. Tap to choose one.');
+  measureBars();
+}
+
+// The hint under the input, on screen only while a category filter is selected:
+// it is the one time the chip above is not simply the user's own last choice,
+// and saying so is cheaper than letting them wonder why it moved.
+function paintQaHint() {
+  const el = $('qaHint');
+  const p = filterProject();
+  if (p) {
+    el.innerHTML = 'New tasks get the <b>' + esc(p) + '</b> category while that filter is on';
+    el.hidden = false;
+  } else {
+    el.textContent = '';
+    el.hidden = true;
+  }
+  measureBars();
+}
+
+function openCatPicker() {
+  const cur = qaCategoryValue();
+  const rows = [['', 'None']].concat(categoryList(cur).map(c => [c, c]));
+  $('catHint').textContent = filterProject()
+    ? 'The ' + filterProject() + ' filter is choosing this. Picking another moves the filter too.'
+    : 'Every new task gets this until you change it.';
+  $('catList').innerHTML = rows.map(r =>
+    '<button data-cat="' + esc(r[0]) + '"' + (r[0] === cur ? ' class="on"' : '') +
+      ' aria-pressed="' + (r[0] === cur ? 'true' : 'false') + '">' +
+      '<span>' + esc(r[1]) + '</span>' +
+      '<span class="tick" aria-hidden="true">✓</span>' +
+    '</button>').join('') +
+    '<button data-cat="__new__" class="new"><span>New category…</span></button>';
+  $('catSheet').hidden = false;
+  $('catSheet').querySelector('.inner').scrollTop = 0;
+}
+function closeCatPicker() { $('catSheet').hidden = true; }
+
+function chooseCategory(v) {
+  if (v === '__new__') { newCategory(); return; }
+  setQaCategory(v);
+  closeCatPicker();
+}
+function newCategory() {
+  const raw = window.prompt('New category name');
+  if (raw === null) return;                       // cancelled, not empty
+  const name = String(raw).trim();
+  if (!CAT_RE.test(name)) { toast(CAT_RULE, { bad: true }); return; }
+  // Lower-cased so "Work" typed here and the `work` that pa writes are one
+  // category and not two chips that look the same.
+  setQaCategory(name.toLowerCase());
+  closeCatPicker();
+}
+
+// Picking a category while a CATEGORY filter is on moves the filter with it.
+// The filter decides what a new task gets, so leaving the two disagreeing would
+// mean a chip that says one thing and a task that does another -- the exact
+// filter confusion this app was built to end (design.md, top). A tag filter is
+// untouched: it does not decide the category, so there is nothing to reconcile.
+function setQaCategory(v) {
+  qaCategory = v || '';
+  if (qaCategory) lsSet(K.qaCategory, qaCategory); else lsDel(K.qaCategory);
+  const f = filterProject();
+  if (f && f !== qaCategory) {
+    setFilter(qaCategory ? 'p:' + qaCategory : '');   // repaints both chips
+    return;
+  }
+  paintQaCat();
+  paintQaHint();
+}
+
+function quickAdd() {
+  const input = $('qaText');
+  const text = input.value.trim();
+  if (!text) { input.focus(); return; }
+  const due = qaDueValue();
+  const proj = qaCategoryValue();   // the chip's value; a filter overrides it
+  const uuid = tmpId();
+  const body = { description: text };
+  if (due) body.due = due;
+  if (proj) body.project = proj;
+
+  // The row the user sees until the server answers. It is a complete Task
+  // shape so every renderer works on it without special cases.
+  const task = {
+    uuid: uuid, description: text, status: 'pending', project: proj || null,
+    priority: null, due: due, due_at: null, tags: [], annotations: [],
+    recur: null, parent: null, depends: [], blocked: false, urgency: 5,
+    entry: new Date().toISOString(), modified: new Date().toISOString(), end: null
+  };
+  // Before the enqueue, because enqueue() is what renders the new row.
+  flashRow(uuid);
+  enqueue({ kind: 'add', uuid: uuid, body: body, task: task });
+
+  input.value = '';
+  // Deliberately does NOT reset the due chip: entering three things all due
+  // today should not mean tapping the chip three times. The text clears, the
+  // date stays, focus stays.
+  input.focus();
+}
+
+// ---- detail sheet ---------------------------------------------------------
+let shTags = [];        // the tag set being edited
+let shPriority = '';
+let shTask = null;
+
+function openSheet(uuid) {
+  const t = currentTask(uuid);
+  if (!t) { toast('That task is gone.', { bad: true }); go('#/tasks'); return; }
+  shTask = t; sheetUuid = uuid;
+  shTags = (t.tags || []).slice();
+  shPriority = t.priority || '';
+
+  $('shTitle').textContent = t.status === 'completed' ? 'Completed task' : 'Task';
+  $('shDesc').value = t.description || '';
+
+  // The same list the quick-add chip offers, including this task's own category
+  // when it is the only thing using it -- see categoryList().
+  $('shProject').innerHTML =
+    '<option value="">— none —</option>' +
+    categoryList(t.project).map(p => '<option value="' + esc(p) + '"' +
+      (p === t.project ? ' selected' : '') + '>' + esc(p) + '</option>').join('') +
+    '<option value="__new__">New category…</option>';
+  $('shNewProject').hidden = true;
+  $('shNewProject').value = '';
+
+  paintPriority();
+
+  const p = dueParts(t.due);
+  $('shDate').value = p ? p.date : '';
+  $('shTime').value = p && p.time ? p.time : '';
+
+  paintSheetTags();
+  paintAnnos(t);
+
+  const foot = [];
+  if (t.parent) foot.push('Repeating instance — completing it spawns the next one.');
+  if (t.blocked) foot.push('Blocked by ' + (t.depends || []).length + ' unfinished task(s).');
+  if (String(uuid).indexOf('tmp-') === 0) foot.push('Not on the server yet.');
+  else foot.push('uuid ' + uuid);
+  if (t.entry) foot.push('added ' + fmtStamp(t.entry));
+  if (t.end) foot.push('completed ' + fmtStamp(t.end));
+  $('shFoot').textContent = foot.join(' · ');
+
+  $('sheet').hidden = false;
+  $('sheetInner').scrollTop = 0;
+}
+function closeSheet() {
+  $('sheet').hidden = true;
+  sheetUuid = ''; shTask = null;
+}
+function paintPriority() {
+  Array.from($('shPriority').children).forEach(b => {
+    const on = (b.getAttribute('data-p') || '') === shPriority;
+    b.className = (b.getAttribute('data-p') || '') + (on ? ' on' : '');
+  });
+}
+function paintSheetTags() {
+  // claude and alert always offered: they are the two that actually mean
+  // something downstream (claude = hand it to a Claude session, alert =
+  // escalated reminder). Everything already on the task, and everything the
+  // server has seen, comes after them.
+  const set = ['claude', 'alert'];
+  for (const t of (meta.tags || [])) if (set.indexOf(t) === -1) set.push(t);
+  for (const t of shTags) if (set.indexOf(t) === -1) set.push(t);
+  $('shTags').innerHTML = set.map(t =>
+    '<button class="chip' + (shTags.indexOf(t) >= 0 ? ' on' : '') +
+    '" data-tag="' + esc(t) + '">' + esc(t) + '</button>').join('');
+}
+function paintAnnos(t) {
+  const rows = (t.annotations || []);
+  $('shAnnos').innerHTML = rows.length
+    ? rows.map(a => '<div class="an"><span class="when">' + esc(fmtStamp(a.entry)) +
+        '</span>' + esc(a.text) + '</div>').join('')
+    : '<div class="an"><span class="when">no notes</span></div>';
+}
+
+function sheetSave() {
+  if (!sheetUuid || !shTask) return;
+  const t = shTask;
+  const body = {};
+
+  const desc = $('shDesc').value.trim();
+  if (!desc) { toast('A task needs a description.', { bad: true }); return; }
+  if (desc !== t.description) body.description = desc;
+
+  let project = $('shProject').value;
+  if (project === '__new__') {
+    // Same rule and same lower-casing as the quick-add picker: one typed here
+    // and one picked there have to be the SAME category, not two chips that
+    // look alike, and neither may be an op the server drops with a 422.
+    const typed = $('shNewProject').value.trim();
+    if (typed && !CAT_RE.test(typed)) { toast(CAT_RULE, { bad: true }); return; }
+    project = typed.toLowerCase();
+  }
+  project = project || null;
+  if (project !== (t.project || null)) body.project = project;
+
+  const pri = shPriority || null;
+  if (pri !== (t.priority || null)) body.priority = pri;
+
+  // A time with no date is meaningless to the contract, so the date decides
+  // whether there is a due at all.
+  const due = joinDue($('shDate').value || '', $('shTime').value || '');
+  if ((due || null) !== (t.due || null)) body.due = due;
+
+  const oldTags = (t.tags || []).slice().sort().join(',');
+  if (shTags.slice().sort().join(',') !== oldTags) body.tags = shTags.slice();
+
+  if (!Object.keys(body).length) { closeSheet(); go('#/tasks'); return; }
+
+  // Patching a tmp- uuid is fine and is exactly what rewriteId() is for: the
+  // add is still ahead of this op in the queue, and when it lands both this
+  // op and the model get the real uuid.
+  enqueue({ kind: 'patch', uuid: sheetUuid, body: body });
+  closeSheet();
+  go('#/tasks');
+  toast('Saved');
+}
+
+// ===========================================================================
+// router
+// ===========================================================================
+const SCREENS = ['tasks', 'done', 'settings'];
+function go(hash) {
+  if (location.hash === hash) route(); else location.hash = hash;
+}
+function show(name) {
+  current = name;
+  SCREENS.forEach(s => { $('scr-' + s).hidden = (s !== name); });
+  $('quickadd').hidden = (name !== 'tasks');
+  $('tabTasks').className = name === 'tasks' ? 'on' : '';
+  $('tabDone').className = name === 'done' ? 'on' : '';
+  $('tabSettings').className = name === 'settings' ? 'on' : '';
+  window.scrollTo(0, 0);
+}
+function route() {
+  // Any row still waiting out its grace commits now. Every screen change comes
+  // through here -- a tab, the sheet, the back button -- and a grace timer that
+  // outlived the screen it was started on can only fire into a list nobody is
+  // looking at. See flushArmed().
+  flushArmed();
+  // The category picker is not a route (it is a chip's menu, not a screen), so
+  // nothing else would take it down when the screen moves out from under it.
+  closeCatPicker();
+  const parts = (location.hash || '').replace(/^#\/?/, '').split('/').filter(Boolean);
+  switch (parts[0]) {
+    case 'done':
+      if (sheetUuid) closeSheet();
+      show('done'); render(); refresh(true); break;
+    case 'settings':
+      if (sheetUuid) closeSheet();
+      show('settings'); fillSettings(); render(); break;
+    case 'task':
+      // The sheet is a route so it survives a reload and can be linked
+      // straight to — which is also how the screenshot of it is taken.
+      show('tasks'); render();
+      if (parts[1]) openSheet(decodeURIComponent(parts[1]));
+      break;
+    case 'tasks':
+    default:
+      if (sheetUuid) closeSheet();
+      show('tasks'); render(); break;
+  }
+}
+window.addEventListener('hashchange', route);
+
+$('tabs').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-go]');
+  if (b) go(b.getAttribute('data-go'));
+});
+
+// ===========================================================================
+// wiring
+// ===========================================================================
+function listClick(ev) {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn) return;
+  const row = btn.closest('.task');
+  if (!row) return;
+  const uuid = row.getAttribute('data-uuid');
+  const act = btn.getAttribute('data-act');
+  // The circle's three acts are one decision: while a row is armed, ANY tap on
+  // its circle cancels, whatever the attribute happens to say. The attribute is
+  // rewritten by paintCheck() and is what a screen reader and the DOM agree on;
+  // the armed table is the truth, and asking it first means a render that
+  // slipped through cannot turn a cancel into a second complete.
+  if (act === 'done' || act === 'undone' || act === 'cancel') {
+    if (isArmed(uuid)) cancelArm(uuid);
+    else if (act === 'done') completeTask(uuid);
+    else if (act === 'undone') uncompleteTask(uuid);
+    return;
+  }
+  if (act === 'button') buttonTap(uuid);
+  else if (act === 'open') go('#/task/' + encodeURIComponent(uuid));
+}
+$('groups').addEventListener('click', listClick);
+$('doneGroups').addEventListener('click', listClick);
+
+$('filterbar').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-f]');
+  if (b) setFilter(b.getAttribute('data-f'));
+});
+
+$('btnRefresh').addEventListener('click', () => syncNow(false));
+$('statusPill').addEventListener('click', () => syncNow(false));
+
+$('qaAdd').addEventListener('click', quickAdd);
+$('qaDue').addEventListener('click', cycleQaDue);
+$('qaCat').addEventListener('click', openCatPicker);
+$('catClose').addEventListener('click', closeCatPicker);
+$('catSheet').addEventListener('click', ev => {
+  if (ev.target === $('catSheet')) closeCatPicker();   // the backdrop
+});
+$('catList').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-cat]');
+  if (b) chooseCategory(b.getAttribute('data-cat'));
+});
+$('qaDate').addEventListener('change', function () { qaPickedDate = this.value; paintQaDue(); });
+$('qaPickClear').addEventListener('click', () => {
+  qaPickedDate = ''; qaDueState = 'none'; paintQaDue();
+});
+$('qaText').addEventListener('keydown', ev => {
+  // Return adds and keeps the field focused, so several tasks can go in
+  // without the keyboard ever closing.
+  if (ev.key === 'Enter') { ev.preventDefault(); quickAdd(); }
+});
+
+$('shClose').addEventListener('click', () => { closeSheet(); go('#/tasks'); });
+$('sheet').addEventListener('click', ev => {
+  if (ev.target === $('sheet')) { closeSheet(); go('#/tasks'); }
+});
+$('shPriority').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-p]');
+  if (!b) return;
+  shPriority = b.getAttribute('data-p') || '';
+  paintPriority();
+});
+$('shProject').addEventListener('change', function () {
+  const isNew = this.value === '__new__';
+  $('shNewProject').hidden = !isNew;
+  if (isNew) $('shNewProject').focus();
+});
+$('shTags').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-tag]');
+  if (!b) return;
+  const t = b.getAttribute('data-tag');
+  const i = shTags.indexOf(t);
+  if (i >= 0) shTags.splice(i, 1); else shTags.push(t);
+  paintSheetTags();
+});
+function addTagFromInput() {
+  const el = $('shNewTag');
+  const raw = el.value.trim();
+  if (!raw) return;
+  // Same shape the contract validates server-side; refusing it here means the
+  // op never gets queued only to be dropped by a 422 later.
+  if (!/^[A-Za-z0-9_]{1,40}$/.test(raw)) {
+    toast('Tags can only use letters, numbers and _', { bad: true }); return;
+  }
+  if (shTags.indexOf(raw) === -1) shTags.push(raw);
+  el.value = '';
+  paintSheetTags();
+}
+$('shAddTag').addEventListener('click', addTagFromInput);
+$('shNewTag').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter') { ev.preventDefault(); addTagFromInput(); }
+});
+$('shClearTime').addEventListener('click', () => { $('shTime').value = ''; });
+$('shClearDue').addEventListener('click', () => { $('shDate').value = ''; $('shTime').value = ''; });
+
+function addNote() {
+  const el = $('shNewNote');
+  const text = el.value.trim();
+  if (!text || !sheetUuid) return;
+  enqueue({ kind: 'annotate', uuid: sheetUuid, body: { text: text } });
+  el.value = '';
+  const t = currentTask(sheetUuid);
+  if (t) { shTask = t; paintAnnos(t); }
+}
+$('shAddNote').addEventListener('click', addNote);
+$('shNewNote').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter') { ev.preventDefault(); addNote(); }
+});
+$('shSave').addEventListener('click', sheetSave);
+$('shDelete').addEventListener('click', () => {
+  if (!sheetUuid || !shTask) return;
+  if (!window.confirm('Delete "' + shTask.description + '"?\n\nThis marks it deleted in Taskwarrior.')) return;
+  enqueue({ kind: 'delete', uuid: sheetUuid });
+  closeSheet();
+  go('#/tasks');
+  toast('Deleted');
+});
+
+// ---- settings -------------------------------------------------------------
+function fillSettings() {
+  $('setBase').value = store.base;
+  $('setToken').value = store.token;
+  // The default line is painted rather than written into the markup, because
+  // there may not be one: an unstamped build has no compiled-in server (see
+  // API_DEFAULT) and must say that plainly instead of naming a host it has not
+  // got. Nothing else changes — the field, Save and Test all work the same.
+  $('setBaseDefault').innerHTML = API_DEFAULT
+    ? 'Default: <span class="mono">' + esc(API_DEFAULT) + '</span>'
+    : '<b>Not configured</b> — enter the server URL above; this build has no ' +
+      'default compiled in.';
+}
+$('setSave').addEventListener('click', () => {
+  store.base = $('setBase').value;
+  store.token = $('setToken').value;
+  // A different server is a different world: the cached ETag would make the
+  // new one answer 304 for a list this phone has never seen.
+  etag = ''; etagDone = ''; lsDel(K.etag); lsDel(K.etagDone);
+  fillSettings();
+  toast('Saved');
+  loadMeta();
+  syncNow(false);
+});
+$('setTest').addEventListener('click', async () => {
+  const out = $('setTestOut');
+  out.hidden = false; out.className = 'banner'; out.textContent = 'Testing…';
+  try {
+    // /health is unauthenticated even when a token is set, so this answers
+    // "can I reach it at all" separately from "is my token right".
+    const r = await req('/health');
+    const h = r.data || {};
+    out.className = 'banner ' + (h.ok ? 'good' : 'bad');
+    out.innerHTML =
+      '<b>' + (h.ok ? 'Reachable' : 'Reachable, but not healthy') + '</b><br>' +
+      'version ' + esc(h.version || '?') +
+      ' · task ' + esc(h.task_version || '—') +
+      ' · ' + esc(String(h.pending === undefined ? '?' : h.pending)) + ' pending<br>' +
+      'tz ' + esc(h.tz || '?') + (h.detail ? '<br>' + esc(h.detail) : '');
+  } catch (err) {
+    out.className = 'banner bad';
+    out.textContent = err.status === 403
+      ? 'Forbidden — this client is not on the tailnet (' + err.detail + ')'
+      : err.detail;
+  }
+});
+$('setRetry').addEventListener('click', () => syncNow(false));
+$('setClear').addEventListener('click', () => {
+  const n = queue.length;
+  const warn = n ? ('\n\n' + n + ' change' + (n > 1 ? 's have' : ' has') +
+                    ' not reached the server yet and will be lost.') : '';
+  if (!window.confirm('Clear the local cache?' + warn)) return;
+  srvTasks = []; srvDone = []; queue = []; etag = ''; etagDone = ''; lastSync = '';
+  [K.tasks, K.done, K.queue, K.etag, K.etagDone, K.lastSync, K.meta].forEach(lsDel);
+  render();
+  toast('Cache cleared');
+  syncNow(false);
+});
+
+// ===========================================================================
+// native hooks (Capacitor) -- every one of them feature-detected
+// ===========================================================================
+// This file runs in three places: a desktop browser (the mock, the
+// screenshots, scripts/mock-api.py), the installed shell, and a bundle the
+// shell live-updated into itself (design.md D11). So nothing below may assume
+// a plugin is there. Each hook looks its plugin up by name and, finding
+// nothing, does nothing -- no throw, no missing feature anywhere else on the
+// screen. `window.Capacitor` itself is absent in a browser, which is why every
+// lookup starts from it.
+function capPlugin(name) {
+  const C = window.Capacitor;
+  return (C && C.Plugins && C.Plugins[name]) || null;
+}
+
+// D11, and it is not optional. @capgo/capacitor-updater installs a bundle,
+// launches it, and -- unless something tells it the bundle actually came up --
+// ROLLS BACK to the previous one. notifyAppReady() is that something. A
+// published bundle that never calls it is not slightly broken, it is reverted,
+// and the symptom is "my change did not ship" with nothing in the app to say
+// why. So it runs first, in its own try/catch, before anything else in boot()
+// has a chance to throw.
+function notifyBundleReady() {
+  try {
+    const up = capPlugin('CapacitorUpdater');
+    if (!up || typeof up.notifyAppReady !== 'function') {
+      console.log('[updater] no CapacitorUpdater plugin - nothing to notify (plain web)');
+      return;
+    }
+    Promise.resolve(up.notifyAppReady()).then(
+      r => console.log('[updater] notifyAppReady ok',
+                       (r && r.bundle && (r.bundle.version || r.bundle.id)) || ''),
+      e => console.log('[updater] notifyAppReady rejected: ' + ((e && e.message) || e)));
+  } catch (e) {
+    console.log('[updater] notifyAppReady threw: ' + ((e && e.message) || e));
+  }
+}
+
+// A tap on the home-screen widget opens the app on a taskmaster:// URL. The
+// widget is the top of this list (design.md D7, D8), so land on the top of
+// this list and ask the server for it -- the widget's copy can be up to 15
+// minutes old and the whole point of D8 is that the two agree.
+function openedFromWidget(why) {
+  console.log('[app] opened from the widget: ' + why);
+  // The widget shows every project, so the list it opens must too (design.md
+  // D8: the first rows on the home screen are the first rows on the phone).
+  if (filter) setFilter('');
+  go('#/tasks');
+  window.scrollTo(0, 0);
+  syncNow(true);
+}
+
+let hiddenAt = 0;        // when the app went to the background; 0 if it has not
+function wireNativeHooks() {
+  const app = capPlugin('App');
+  if (!app) {
+    console.log('[app] no App plugin - widget deep link off, visibility fallback on');
+    return;
+  }
+  if (typeof app.addListener === 'function') {
+    try {
+      app.addListener('appUrlOpen', ev => {
+        const url = String((ev && ev.url) || '');
+        // Only our own scheme. Universal links and anything else the OS hands
+        // over are somebody else's business and must not move the screen.
+        if (url.indexOf('taskmaster://') !== 0) return;
+        openedFromWidget(url);
+      });
+    } catch (e) {
+      console.log('[app] appUrlOpen listener failed: ' + ((e && e.message) || e));
+    }
+  }
+  if (typeof app.getInfo === 'function') {
+    // The native version and build -- which is what a TestFlight tester can
+    // actually read off the App Store listing, and what a bug report quotes.
+    // The CI-stamped placeholder in the markup stays exactly where it is as
+    // the fallback: in a browser there is no native anything to ask.
+    try {
+      Promise.resolve(app.getInfo()).then(info => {
+        if (info && info.version) {
+          $('build').textContent =
+            'Version ' + info.version + ' (' + (info.build || '?') + ')';
+        }
+      }, e => console.log('[app] getInfo rejected: ' + ((e && e.message) || e)));
+    } catch (e) {
+      console.log('[app] getInfo threw: ' + ((e && e.message) || e));
+    }
+  }
+}
+
+// The published-bundle stamp (D11). scripts/publish_bundle.py rewrites the
+// placeholder in the Settings span to a version like 2026.0904.1 in the copy
+// it zips -- never in the repo file -- so a placeholder that is still there
+// means this is the bundle that shipped inside the app.
+//
+// The literal is spelled by concatenation ON PURPOSE. That sed rewrites the
+// whole file: written out in full here, the test would be rewritten too, into
+// a comparison against the very version it just wrote, and every live-updated
+// bundle would proudly report itself as "built-in".
+const BUNDLE_PLACEHOLDER = '__' + 'BUNDLE' + '__';
+function paintBuildInfo() {
+  const el = $('bundle');
+  if (el && el.textContent.trim() === BUNDLE_PLACEHOLDER) el.textContent = 'built-in';
+}
+
+// ===========================================================================
+// lifecycle
+// ===========================================================================
+// Refresh on foreground, and on a 30 s beat while visible. With If-None-Match
+// a beat that finds nothing new is a 304 with no body, which is what makes
+// polling this often reasonable at all.
+document.addEventListener('visibilitychange', () => {
+  // Same reason as in route(), plus a harder one: a backgrounded tab's timers
+  // are throttled to the point where a 1.2 s grace can take a minute, and the
+  // row's hold on render() would go with it.
+  if (document.hidden) { flushArmed(); hiddenAt = Date.now(); return; }
+  syncNow(true);
+  // Without the App plugin there is no appUrlOpen to say the widget was
+  // tapped, and "gone for a while, now back" is the closest honest proxy for
+  // "came to this on purpose". Five minutes, so flicking to another app for a
+  // moment never moves the screen out from under a thumb mid-scroll.
+  const away = hiddenAt ? Date.now() - hiddenAt : 0;
+  hiddenAt = 0;
+  if (!capPlugin('App') && away > 5 * 60 * 1000) {
+    go('#/tasks');
+    window.scrollTo(0, 0);
+  }
+});
+setInterval(() => { if (!document.hidden) syncNow(true); }, POLL_MS);
+window.addEventListener('online', () => syncNow(true));
+window.addEventListener('resize', measureBars);
+
+function boot() {
+  // First, before anything here can throw: an un-notified bundle is rolled
+  // back at the next launch. See notifyBundleReady().
+  notifyBundleReady();
+
+  const q = new URLSearchParams(location.search);
+
+  // ?server= is how the dev browser and the mock are pointed at each other;
+  // storing it means a reload without the query keeps working.
+  const s = q.get('server');
+  if (s) { store.base = s; etag = ''; etagDone = ''; lsDel(K.etag); lsDel(K.etagDone); }
+
+  // ?theme=dark|light forces the palette. It exists so the dark variant can be
+  // screenshotted headlessly, where emulating prefers-color-scheme is
+  // unreliable, and it is harmless the rest of the time.
+  const th = q.get('theme');
+  if (th === 'dark' || th === 'light') document.documentElement.setAttribute('data-theme', th);
+
+  // ?screen=done|settings is an alias for the hash, for the same reason.
+  const scr = q.get('screen');
+  if (scr && !location.hash) location.hash = '#/' + scr;
+
+  fillSettings();
+  paintBuildInfo();
+  paintQaHint();
+  paintQaCat();
+  paintQaDue();
+  wireNativeHooks();
+  if (!location.hash) location.hash = '#/tasks';
+  // Cache first, network second: the list is on screen before anything is
+  // asked of the network, which is the entire answer to "sync lag".
+  route();
+  loadMeta();
+  syncNow(true);
+}
+boot();
+</script>
+</body>
+</html>

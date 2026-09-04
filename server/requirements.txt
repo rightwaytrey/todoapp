@@ -1,0 +1,9 @@
+# TaskMaster server — lower bounds that work on Python 3.10 (the host's).
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.7.0
+# Test-only, but kept here because pytest is not installed system-wide on this
+# box and the venv is the only place the suite ever runs.
+httpx>=0.27.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+
+	<!-- The name under the widget in the gallery. Matches the app's
+	     CFBundleDisplayName so the two read as one product. -->
+	<key>CFBundleDisplayName</key>
+	<string>TaskMaster</string>
+
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+
+	<!-- XPC! is the package type for an app extension, the way the app's own
+	     plist says APPL. Hardcoded rather than $(PRODUCT_BUNDLE_PACKAGE_TYPE)
+	     because there is exactly one right answer for this product type. -->
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+
+	<!-- The build stamps these from the xcodebuild command line, the same two
+	     values the app gets (.github/workflows/testflight.yml passes
+	     MARKETING_VERSION and CURRENT_PROJECT_VERSION, so every target in the
+	     project takes them). An extension whose version does not match its
+	     host app is rejected at upload, so these must stay variables — never
+	     literals. -->
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+
+	<!-- WHERE THE WIDGET'S SERVER URL COMES FROM. The extension has no App
+	     Group (design.md D7), so it cannot read the app's Settings screen and
+	     cannot read www/index.html either. It reads this key instead, at
+	     runtime, through Bundle.main.object(forInfoDictionaryKey:) — see
+	     serverBase() in TaskMasterWidget.swift.
+
+	     THE VALUE BELOW IS A PLACEHOLDER, stamped by CI from the
+	     TASKMASTER_API_BASE repository secret — the same value that goes into
+	     www/index.html and capacitor.config.ts (.github/workflows/testflight.yml,
+	     "Stamp server configuration"). The real host is not in this repo. Left
+	     unstamped the widget fetches nothing and says "Server not configured",
+	     which is honest; the workflow refuses to build a plist in that state. -->
+	<key>TaskMasterAPIBase</key>
+	<string>__API_BASE__</string>
+
+	<!-- ATS IS EVALUATED PER BUNDLE. This extension is its own bundle and does
+	     its own http fetch straight to the API (TaskMasterWidget.swift,
+	     design.md D7) — the app's exception in ios/App/App/Info.plist does not
+	     reach it, and without this copy the widget just shows "Can't reach the
+	     server" with nothing in the log to say why.
+
+	     Keep this block IDENTICAL to the app's: scoped to one domain (the
+	     placeholder key below), not NSAllowsArbitraryLoads, because there is a
+	     real MagicDNS hostname to scope to (design.md D4). The same caveat applies
+	     here too — an IP literal in NSExceptionDomains is silently ignored,
+	     which is why TaskMasterAPIBase above must be the MagicDNS name and not
+	     a tailnet IP.
+
+	     If tailscale serve ever fronts the API with HTTPS, change
+	     TaskMasterAPIBase (and the TASKMASTER_API_BASE secret) to https and
+	     delete this block in both plists. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>__ATS_DOMAIN__</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+
+	<!-- What makes this a WidgetKit extension. There is no
+	     NSExtensionPrincipalClass: WidgetKit finds the entry point through
+	     @main on the Widget struct instead. -->
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.widgetkit-extension</string>
+	</dict>
+</dict>
+</plist>

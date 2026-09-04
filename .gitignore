@@ -1,0 +1,25 @@
+node_modules/
+build/
+*.ipa
+Payload/
+.DS_Store
+
+# iOS CocoaPods (Capacitor 8 uses SPM, but a plugin that ships a podspec can
+# still drag Pods/ into the tree). ios/ has its own .gitignore for the rest.
+ios/App/Pods/
+
+# Server — the venv is machine-local. server/ has its own .gitignore, which is
+# also where the app-bundle store (server/bundles/, design.md D11) is excluded:
+# the zips and manifest.json are published output, never committed, and the
+# empty directory is kept with a .gitkeep.
+server/.venv/
+.env
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# www/ is NOT a build artifact: www/index.html IS the app — the file that is
+# committed is the file that runs on the phone. Never gitignore it. Nothing
+# else belongs in www/ either; the copy under ios/App/App/public/ is the
+# generated one, and ios/.gitignore already excludes that.

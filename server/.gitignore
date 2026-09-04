@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+
+# The app bundle store (docs/design.md D11). scripts/publish_bundle.py writes
+# www-<version>.zip + manifest.json here and /api/app/update serves them. They
+# are build output — a zip of www/index.html at one moment, whose checksum a
+# phone has already been told — so they are never committed; the directory
+# itself is, empty, because the server logs the path it is reading at startup
+# and an absent directory reads as a misconfiguration rather than "nothing
+# published yet".
+bundles/*
+!bundles/.gitkeep

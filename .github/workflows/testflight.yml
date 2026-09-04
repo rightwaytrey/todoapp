@@ -1,0 +1,234 @@
+# Build TaskMaster and upload it to TestFlight.
+#
+# Same shape as orderconfirm-ios, carpool and transitnav-ios, minus the
+# web-bundle stage: the UI is a single committed www/index.html, so there is
+# nothing to build first — `npx cap sync ios` copies it into the Xcode project.
+#
+# DISPATCH ONLY. There is deliberately no `push:` trigger (design.md D5):
+#
+#   * macOS runners bill at 10x the Linux rate, so one ~20-minute build costs
+#     ~200 minutes of the monthly allowance. August 2026 ran out of minutes
+#     entirely, on dispatches that shipped nothing new.
+#   * This is a single-file app. A build is only worth spending on when
+#     www/index.html or the shell (capacitor.config.ts, ios/, this file)
+#     actually changed. A server-only or docs-only commit ships nothing to the
+#     phone — the API is deployed by systemd on the home server, not by this
+#     workflow.
+#
+# So: change www/index.html, commit, then dispatch by hand:
+#
+#   echo '{"ref":"main"}' | gh api --method POST \
+#     repos/rightwaytrey/todoapp/actions/workflows/testflight.yml/dispatches --input -
+#
+# Also re-dispatch every ~90 days: TestFlight builds expire and the installed
+# app stops launching.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions),
+# SIX of them — see SHIP.md. The first four are the Apple credentials and are
+# the same values as orderconfirm-ios and carpool; the last two are this repo's
+# only private configuration, kept out of the tree because it names the user's
+# own network and this repo is public:
+#   APPLE_TEAM_ID          - 10-char team id (App Store Connect → Membership)
+#   ASC_KEY_ID             - App Store Connect API key ID
+#   ASC_ISSUER_ID          - App Store Connect API issuer ID (UUID)
+#   ASC_KEY_P8_BASE64      - the .p8 key file, base64 -w0
+#   TASKMASTER_API_BASE    - the API base URL the phone uses: scheme, host and
+#                            port, no trailing slash (e.g. http://host:8101).
+#                            Stamped over __API_BASE__ by "Stamp server
+#                            configuration" below.
+#   TASKMASTER_ATS_DOMAIN  - the ATS exception domain: the bare domain the two
+#                            Info.plists scope their cleartext exception to
+#                            (e.g. example.ts.net). Stamped over __ATS_DOMAIN__.
+#
+# Neither of the last two has a default anywhere in the repo. A checkout with
+# them unstamped is a working app with NO server configured — Settings says
+# "not configured — enter the server URL" and the widget says "Server not
+# configured" — which is exactly what local browser development (?server=)
+# wants, and exactly what must never reach TestFlight. Hence the hard failures.
+name: TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Nothing gates on this — there is no cheap lane job to skip, because
+      # there is nothing to build but the shell. It is a label: tick it when
+      # you are rebuilding an unchanged app (the 90-day expiry, a forced
+      # resign) and the run summary says so, which is the difference between
+      # "why is there a second identical build" and a one-line answer.
+      force:
+        description: 'Rebuilding an unchanged app on purpose (90-day TestFlight expiry, forced resign)'
+        type: boolean
+        default: false
+        required: false
+
+jobs:
+  testflight:
+    # macos-26: App Store Connect rejects uploads built with SDKs older than
+    # iOS 26 (Xcode 26), which this image has as its default toolchain.
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Settings shows this string at the bottom of the screen, and it is the
+      # only way to tell over TestFlight which build a phone is actually
+      # running. It must be stamped BEFORE cap sync, because sync is what
+      # copies www/ into ios/App/App/public — stamping after it ships the
+      # literal __BUILD__ to the phone.
+      #
+      # Hard failure if the placeholder is missing: that means someone removed
+      # the <span id="build">__BUILD__</span> from www/index.html, and a silent
+      # no-op sed would ship an unidentifiable build.
+      - name: Stamp build number
+        run: |
+          set -e
+          grep -q '__BUILD__' www/index.html \
+            || { echo "::error::__BUILD__ placeholder is not in www/index.html — nothing to stamp"; exit 1; }
+          sed -i '' "s/__BUILD__/1.0.${{ github.run_number }}/g" www/index.html
+          if grep -q '__BUILD__' www/index.html; then
+            echo "::error::__BUILD__ still present after sed"; exit 1
+          fi
+          echo "stamped 1.0.${{ github.run_number }}"
+          {
+            echo "### TestFlight build \`1.0.${{ github.run_number }}\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Build (CFBundleVersion) | \`${{ github.run_number }}\` |"
+            echo "| Version (MARKETING_VERSION) | \`1.0.${{ github.run_number }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo ""
+            echo "Shown in the app at Settings → Build."
+            if [ "${{ inputs.force }}" = "true" ]; then
+              echo ""
+              echo "_Dispatched with **force**: a deliberate rebuild of an unchanged app._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The API base and the ATS exception domain are the only two values in
+      # this repo that name the user's own network, so they are not committed:
+      # they are repository secrets, stamped in here. Passed through `env:` so
+      # the runner masks them — nothing below echoes either value, and the log
+      # of a public repo is a public log.
+      #
+      # BEFORE cap sync, for the same reason __BUILD__ is: sync is what copies
+      # www/ into ios/App/App/public and the plists into the built product.
+      # Stamping after it would ship the literal placeholders to the phone,
+      # where they read as "no server configured" — a correct local-dev state
+      # and a broken TestFlight build.
+      #
+      # Three hard failures rather than a silent no-op sed: an empty secret, a
+      # placeholder that is no longer in the file it belongs to, and a
+      # placeholder that survived. Each of them ships an app that cannot reach
+      # anything, and none of them is visible until someone launches it.
+      - name: Stamp server configuration
+        env:
+          API_BASE: ${{ secrets.TASKMASTER_API_BASE }}
+          ATS_DOMAIN: ${{ secrets.TASKMASTER_ATS_DOMAIN }}
+        run: |
+          set -eu
+          [ -n "${API_BASE}" ] || {
+            echo "::error::repository secret TASKMASTER_API_BASE is empty. It holds the API base URL the phone uses (scheme, host, port, no trailing slash). Set it in Settings → Secrets and variables → Actions."
+            exit 1; }
+          [ -n "${ATS_DOMAIN}" ] || {
+            echo "::error::repository secret TASKMASTER_ATS_DOMAIN is empty. It holds the ATS exception domain the two Info.plists scope their cleartext exception to. Set it in Settings → Secrets and variables → Actions."
+            exit 1; }
+
+          for f in www/index.html capacitor.config.ts ios/App/TaskMasterWidget/Info.plist; do
+            grep -q '__API_BASE__' "$f" \
+              || { echo "::error::__API_BASE__ is not in $f — nothing to stamp, so this build would ship an app with no server"; exit 1; }
+          done
+          for f in ios/App/App/Info.plist ios/App/TaskMasterWidget/Info.plist; do
+            grep -q '__ATS_DOMAIN__' "$f" \
+              || { echo "::error::__ATS_DOMAIN__ is not in $f — without the exception ATS blocks every cleartext load and the app just says offline"; exit 1; }
+          done
+
+          # '|' as the delimiter: both values contain '/' or ':' and neither can
+          # contain a pipe.
+          for f in www/index.html capacitor.config.ts \
+                   ios/App/App/Info.plist ios/App/TaskMasterWidget/Info.plist; do
+            sed -i '' -e "s|__API_BASE__|${API_BASE}|g" \
+                      -e "s|__ATS_DOMAIN__|${ATS_DOMAIN}|g" "$f"
+          done
+
+          for f in www/index.html capacitor.config.ts \
+                   ios/App/App/Info.plist ios/App/TaskMasterWidget/Info.plist; do
+            if grep -qE '__API_BASE__|__ATS_DOMAIN__' "$f"; then
+              echo "::error::a placeholder survived the stamp in $f"; exit 1
+            fi
+          done
+          echo "stamped the server configuration into 4 files"
+
+      - name: Sync Capacitor iOS project
+        run: npx cap sync ios
+
+      - name: Write App Store Connect API key
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.ASC_KEY_P8_BASE64 }}" | base64 --decode > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+
+      - name: Stamp team id into ExportOptions
+        run: |
+          sed -i '' "s/__APPLE_TEAM_ID__/${APPLE_TEAM_ID}/" ios/ExportOptions.plist
+
+      # Archive UNSIGNED (transitnav-ios's pattern). Signing at archive time
+      # needs an iOS Development cert, and each ephemeral runner mints a fresh
+      # one until the account hits Apple's certificate cap ("choose a
+      # certificate to revoke"). The export step below signs with the
+      # cloud-managed DISTRIBUTION cert (Apple holds the key, reused across
+      # runs), which is all TestFlight needs.
+      #
+      # This is safe here and NOT in carpool because this app has no
+      # entitlements: skipping signing also skips entitlement processing, which
+      # is fatal for an app that needs aps-environment but costs us nothing.
+      # If an entitlement is ever added (see ios/App/App/Info.plist), this step
+      # has to become a signed archive.
+      - name: Archive (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/App.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            MARKETING_VERSION=1.0.${{ github.run_number }} \
+            archive | tail -40
+
+      - name: Export IPA
+        run: |
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath build/App.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist ios/ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 | tail -30
+          ls -lh build/export
+
+      - name: Upload to TestFlight
+        run: |
+          xcrun altool --upload-app -f build/export/*.ipa -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: Cleanup key
+        if: always()
+        run: rm -f ~/private_keys/AuthKey_*.p8

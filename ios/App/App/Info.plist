@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CAPACITOR_DEBUG</key>
+	<string>$(CAPACITOR_DEBUG)</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>TaskMaster</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!-- The `taskmaster` scheme exists for ONE reason: the home-screen widget's
+	     .widgetURL("taskmaster://today") (ios/App/TaskMasterWidget/, design.md
+	     D7). Tapping a widget opens the URL it declares, and iOS will not open
+	     it unless the scheme is registered here — the tap just does nothing.
+
+	     The app deliberately does not HANDLE the URL. Launching is the whole
+	     feature; the app opens on the Tasks screen, which is where the tap was
+	     going anyway. Capacitor's SceneDelegate already forwards
+	     openURLContexts to the bridge, so if a deep link is ever wanted
+	     (#/task/<uuid> from a widget row) there is nothing to wire up first.
+
+	     Bare `taskmaster`, not the reverse-DNS `org.rightwaytrey.taskmaster`
+	     that carpool registers: nothing outside this app and its own extension
+	     ever writes this URL, so there is no one to collide with, and it is
+	     what the widget's source reads as. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>org.rightwaytrey.taskmaster</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>taskmaster</string>
+			</array>
+		</dict>
+	</array>
+
+	<!-- The API is plain http over the Tailscale tailnet (design.md D4), and
+	     App Transport Security blocks cleartext by default, so without this
+	     block the app just says "offline" with nothing in the log to explain
+	     it.
+
+	     THE DOMAIN KEY BELOW IS A PLACEHOLDER. The real domain is not in this
+	     repo: CI stamps it from the TASKMASTER_ATS_DOMAIN repository secret
+	     (.github/workflows/testflight.yml, "Stamp server configuration"), and
+	     the workflow fails rather than build a plist that still has the
+	     placeholder in it. A local checkout keeps the literal, which matches
+	     the app having no default server URL at all — nothing is fetched, so
+	     there is nothing for ATS to block.
+
+	     Three things about how this is written:
+
+	     * It is a SCOPED NSExceptionDomains entry for one domain, not
+	       NSAllowsArbitraryLoads. orderconfirm-ios had to use the blanket
+	       form because it talks to a bare IP; we have a real MagicDNS
+	       hostname, so there is something narrower to scope to and the rest
+	       of the app keeps ATS. Do not widen this.
+	     * An IP LITERAL here would be silently ignored — NSExceptionDomains
+	       keys are domain names — and the connection refused anyway. That is
+	       exactly why the app's default server URL is the MagicDNS name and
+	       not a tailnet IP. If you ever put an IP in Settings, expect
+	       "offline".
+	     * The path is not the open internet: WireGuard already encrypts every
+	       byte between the phone and the home server, the server refuses any
+	       client outside loopback and 100.64.0.0/10, and there is exactly one
+	       user.
+
+	     If tailscale serve is ever set up to front the API with HTTPS
+	     (server/README.md — it needs a sudo the build session did not have),
+	     change the saved URL to https and delete this whole block. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>__ATS_DOMAIN__</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+
+	<!-- Deliberately absent: no UIBackgroundModes, no aps-environment, no
+	     location keys, no App.entitlements at all. Nothing in this app needs
+	     to reach a closed phone — `pa remind` already sends the due-date
+	     reminders through Pushover (design.md D5) — and an app that asks for
+	     nothing is an app with nothing to explain at review time. It is also
+	     what lets CI archive UNSIGNED and dodge the certificate cap; adding
+	     an entitlement later means changing .github/workflows/testflight.yml
+	     to archive signed, the way carpool has to. -->
+
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default Configuration</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+					<key>UISceneStoryboardFile</key>
+					<string>Main</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,20 @@
+{
+  "name": "taskmaster-ios",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native iOS front-end for the Taskwarrior tasks on the home server — Capacitor shell around a single www/index.html",
+  "scripts": {
+    "sync": "cap sync ios",
+    "serve": "python3 -m http.server 8112 -d www"
+  },
+  "dependencies": {
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/ios": "^8.4.1",
+    "@capgo/capacitor-updater": "^8.51.15"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.4.1",
+    "typescript": "^6.0.3"
+  }
+}
