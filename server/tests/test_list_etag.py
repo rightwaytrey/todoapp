@@ -15,15 +15,20 @@ async def test_pending_is_the_default_and_has_no_filter(client):
     assert default == await listing(client, "pending")
 
 
-async def test_pending_is_sorted_by_urgency_desc(client):
+async def test_pending_comes_out_in_display_order(client):
+    """Round 5 moved the ordering to the server (docs/design.md D14). It is no
+    longer urgency order: the overdue group leads whatever its urgency is.
+    The full rules live in test_ordering.py; this is the List contract."""
     await make(client, "low")
     await make(client, "high", priority="H", due="2026-09-03")
     await make(client, "middle", priority="L")
 
     rows = await listing(client)
-    urgencies = [t["urgency"] for t in rows]
-    assert urgencies == sorted(urgencies, reverse=True)
-    assert rows[0]["description"] == "high"
+    assert rows[0]["description"] == "high"              # overdue, so first
+    assert rows[0]["group"] == "overdue"
+    # …and the two undated ones fall to the no-date group, urgency first.
+    assert [t["description"] for t in rows[1:]] == ["middle", "low"]
+    assert [t["group"] for t in rows[1:]] == ["none", "none"]
 
 
 async def test_completed_window_and_ordering(client):

@@ -123,7 +123,7 @@ every write. That is the whole answer to "sync lag": there is nothing to sync.
 A native WidgetKit extension, `ios/App/TaskMasterWidget/`, showing what the
 Scriptable widget shows: a "Today" header with a count, overdue rows first in
 red, then due-today, "+N more" when it does not fit, "Nothing due 🎉" when it is
-empty, and an "updated Xm ago" footer. Small/medium/large hold 3/6/12 rows.
+empty, and an "updated Xm ago" footer. Small/medium/large hold 3/5/12 rows.
 
 **It calls `GET /api/tasks` itself, over the tailnet, exactly like the app.** It
 does not read a file the app left behind, because it cannot: an extension is a
@@ -375,10 +375,99 @@ does this go?" one screen away from the moment of typing it.
 Client-only: it ships as a bundle (D11), no native change. The widget shows every
 category and is unaffected.
 
+## D14 — The server orders; the widget draws
+
+*Added 2026-09-04.* D8 settled what the canonical order **is**. It did not stop
+there being three copies of it: `orderKey()`/`groupOf()` in `www/index.html`,
+`sortKey`/`rowsFrom()` in `TaskMasterWidget.swift`, and — the moment manual
+ordering and sort preferences appeared — a fourth in whatever came next. Three
+implementations of one rule, in two languages, that must agree byte for byte or
+the user taps the widget and lands on a list in a different order. That is the
+bug D8 exists to close, and keeping it closed by discipline alone was not
+working.
+
+So `GET /api/tasks` now returns the pending half **already sorted**, and every
+task carries `"group"` (overdue / today / upcoming / none) and `"order"`.
+`GET /api/widget` goes further and returns finished rows — text, due label,
+overdue flag — in display order. The clients render what they are given. They
+keep their own copy of the rule for exactly one job: placing an optimistic row
+the phone has typed but not yet sent (D6).
+
+**Three things this buys, none of them available otherwise:**
+
+- **Manual order.** Drag-to-reorder needs somewhere to persist a position.
+  Taskwarrior has one: a numeric UDA, `order`, declared in `~/.taskrc` by
+  `server/deploy/install.sh`. The phone sends a midpoint between the new
+  neighbours; the server writes `order:<n>`; the widget gets the same
+  arrangement for free, having implemented nothing.
+- **The widget follows a preference without a build.** How many rows, which
+  groups, which category, whether to show it — all of that used to be Swift,
+  and a Swift change is a TestFlight build (D5, and August's macOS minutes).
+  Now it is a `PUT /api/prefs`.
+- **The date rule is decided once, in one zone.** The overdue/today split is
+  clock-sensitive and the two clients had to reproduce it — including "a
+  clocked due today is overdue a minute after its time, a date-only one is not
+  until tomorrow" (D3). The server's zone is pinned by the unit
+  (`TZ=America/Chicago`), so there is one clock and one answer.
+
+**Ruled out:** sending `sort.mode` to the clients and letting them sort (the
+same three implementations, plus a new way for them to disagree); a
+`?sort=` query parameter instead of a preference (the widget cannot be told
+one, and then the phone and the home screen disagree again — exactly D8);
+and computing `group` on the client from a server-supplied "now" (an
+instant-based comparison is what puts every task due today into Overdue at
+19:00 CDT, which is the bug the string comparison in `groupOf()` exists to
+avoid).
+
+**The cost, and it is real:** `group` depends on the clock, so the list body —
+and therefore the ETag — changes when a task crosses its due minute even though
+nothing was written. That is not waste: it is the poll noticing something the
+old design could only notice by re-deriving it locally, and it is one 200 per
+task per day.
+
+## D15 — Preferences live on the server
+
+*Added 2026-09-04.* One JSON document at `~/.config/taskmaster/prefs.json`,
+read and written through `GET`/`PUT /api/prefs`: category order and hidden
+categories, the filter chip row, the sort mode, and everything about the
+widget. The phone, the widget and the server all read the same file, so there
+is no sync problem to have — the same argument as D1, one layer up. A setting
+changed on the Settings screen is in effect on the home screen at the widget's
+next refresh, with nothing to push and nothing to reconcile.
+
+**Why not localStorage on the phone:** the widget cannot read it. An extension
+is a separate bundle with a separate container and the only way to share one is
+an **App Group, which is an entitlement** — the entitlement this app does not
+have, on purpose, because not having it is what lets CI archive unsigned (D7).
+The server is the shared container this app already has.
+
+**Why not a Taskwarrior UDA:** none of this is task data. The widget's row caps
+would end up in every `task export`, in the digest, and in `pa`'s reports, for
+a setting that is about a screen.
+
+**Why one file and a whole-document PUT:** it is under a kilobyte and the
+client holds all of it, so a partial update would need a merge rule per section
+for no gain. Missing sections default; unknown keys are dropped, not rejected
+(a stray key from a client built against a newer contract must not be an
+integration failure); and a file that will not parse reads as the defaults
+rather than taking the task list down with it. Writes are atomic — a sibling
+`.tmp` and one `rename`, the same shape `publish_bundle.py` uses for the
+manifest — so a reader sees the old document or the new one, never half of one.
+
+**Ruled out:** iOS widget configuration intents. They are the native way to do
+this, and they mean a **build per change** to the options, an App Intent per
+setting, and a configuration UI that only reaches the widget — the phone's own
+Settings screen would still need its own copy of every value. One JSON file
+does all of it and can be edited with `$EDITOR` when something is wrong at
+07:00.
+
 ## Out of scope for v1 (build together later)
 
-Recurrence editing (recurring templates are managed upstream in `pa`), dependencies
-(shown as "blocked", not editable), push notifications, Android, multi-user.
+~~Recurrence editing (recurring templates are managed upstream in `pa`)~~ —
+**built 2026-09-04**, server-side: `PATCH` takes `recur`/`until` and routes them
+to the template (docs/api.md Recurrence, which also records what Taskwarrior
+3.4.2 will and will not let go of). Dependencies (shown as "blocked", not
+editable), push notifications, Android, multi-user.
 
 ~~a native widget (the Scriptable one keeps working unchanged)~~ — **built
 2026-09-04, see D7.** The Scriptable widget does still work unchanged, and

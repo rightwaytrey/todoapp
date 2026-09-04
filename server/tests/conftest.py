@@ -34,7 +34,15 @@ RC.write_text(
     "data.location=%s\n"
     "hooks=off\n"
     "confirmation=off\n"
-    "recurrence=on\n" % DATA
+    "recurrence=on\n"
+    # The manual-order UDA (docs/api.md "Ordering moves to the server"), the
+    # same two lines deploy/install.sh puts in the real ~/.taskrc. They are not
+    # optional here: with the UDA undeclared, `task <uuid> modify order:1500`
+    # exits 0 and rewrites the task's DESCRIPTION to "order:1500", so the tests
+    # would pass against a Taskwarrior doing something quite different from
+    # production.
+    "uda.order.type=numeric\n"
+    "uda.order.label=Order\n" % DATA
 )
 
 # --- the rail. Never let a test touch the real ~/.task. ---------------------
@@ -42,9 +50,15 @@ assert DATA.is_relative_to(Path(tempfile.gettempdir()).resolve()), DATA
 assert DATA != REAL_TASKDATA, DATA
 assert REAL_TASKDATA not in DATA.parents, DATA
 
+PREFS = _TMP / "prefs.json"
+
 os.environ["TASKRC"] = str(RC)
 os.environ["TASKDATA"] = str(DATA)
 os.environ["TASKMASTER_TZ"] = "America/Chicago"
+# The same rail as TASKDATA, for the same reason: the real file is
+# ~/.config/taskmaster/prefs.json and a test that wrote it would rearrange the
+# user's own category order.
+os.environ["TASKMASTER_PREFS"] = str(PREFS)
 os.environ.pop("TASKMASTER_TOKEN", None)
 os.environ.pop("TASKMASTER_ALLOW_CIDRS", None)
 
@@ -60,6 +74,8 @@ from app.config import reload_settings, settings                 # noqa: E402
 # the server will run is pointed at the throwaway store.
 assert os.environ["TASKDATA"] == str(DATA)
 
+assert settings.prefs_path == PREFS, settings.prefs_path
+
 TASK = settings.task_bin
 
 
@@ -73,12 +89,15 @@ def task(*args: str) -> subprocess.CompletedProcess:
 
 @pytest.fixture(autouse=True)
 def clean_db():
-    """One empty database per test."""
+    """One empty database, and one un-configured server, per test."""
     for child in DATA.iterdir():
         if child.is_dir():
             shutil.rmtree(child, ignore_errors=True)
         else:
             child.unlink()
+    # No prefs file: every test starts from the documented defaults, the same
+    # state a freshly installed box is in.
+    PREFS.unlink(missing_ok=True)
     reload_settings()
     yield
 

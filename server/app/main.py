@@ -17,7 +17,8 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .errors import TaskFailed
 from .middleware import AccessControl
-from .routers import app_update, health, meta, tasks
+from .routers import (app_update, categories, health, meta, prefs, tasks,
+                      widget)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +42,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS", "PUT"],
     allow_headers=["Authorization", "Content-Type", "If-None-Match"],
     expose_headers=["ETag"],
 )
@@ -95,6 +96,11 @@ async def unhandled(request: Request, exc: Exception):
 app.include_router(health.router)                                # /health
 app.include_router(meta.router, prefix=settings.api_prefix)      # /api/meta
 app.include_router(tasks.router, prefix=settings.api_prefix)     # /api/tasks
+# Round 5 (docs/api.md, docs/design.md D14/D15): the settings document, the
+# category bulk operations, and the widget's own pre-drawn feed.
+app.include_router(prefs.router, prefix=settings.api_prefix)     # /api/prefs
+app.include_router(categories.router, prefix=settings.api_prefix)
+app.include_router(widget.router, prefix=settings.api_prefix)    # /api/widget
 # /api/app/update + /api/app/bundles/… — the shell's own live-update endpoints
 # (docs/design.md D11). Nothing to do with tasks; the phone's WebView never
 # calls these, the native plugin does.

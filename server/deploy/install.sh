@@ -49,6 +49,45 @@ else
   echo "    WARNING: no task binary found; /health will answer ok:false."
 fi
 
+# The `order` UDA — manual drag-to-reorder (docs/api.md "Ordering moves to the
+# server"). Two lines, and PATCH {"order": …} refuses to run without them.
+#
+# That refusal is not caution, it is the only safe behaviour: with the UDA
+# undeclared, `task <uuid> modify order:1500` exits **0** and rewrites the
+# task's DESCRIPTION to "order:1500", because the token is not an attribute
+# Taskwarrior knows and falls through to the text. Verified on 3.4.2. One drag
+# would shred a screenful of real tasks.
+#
+# Appending is safe on a live file: `order` collides with nothing (~/.taskrc
+# already declares legacy_id, legacy_urgency and effort), and a numeric UDA
+# with no `urgency.uda.order.coefficient` contributes 0 to urgency — checked,
+# so no task's urgency moves and no report reorders itself.
+RCFILE="${TASKRC:-$HOME/.taskrc}"
+echo "==> 2b/5  the 'order' UDA in $RCFILE"
+if [ ! -f "$RCFILE" ]; then
+  echo "    no $RCFILE yet -- Taskwarrior writes one on first run; re-run this"
+  echo "    script afterwards to add the UDA."
+elif grep -qE '^[[:space:]]*uda\.order\.type[[:space:]]*=' "$RCFILE"; then
+  echo "    already declared:"
+  grep -nE '^[[:space:]]*uda\.order\.(type|label)[[:space:]]*=' "$RCFILE" | sed 's/^/      /'
+else
+  # Back up before touching a file the user maintains by hand. Timestamped, so
+  # running this twice never overwrites the copy that has the old contents.
+  BACKUP="$RCFILE.taskmaster-$(date +%Y%m%d%H%M%S).bak"
+  cp -p "$RCFILE" "$BACKUP"
+  cat >> "$RCFILE" <<'RC'
+
+# --- TaskMaster -----------------------------------------------------------
+# order: manual position within a group, set by drag-to-reorder in the phone
+# app (server/app/routers/tasks.py, docs/api.md). Numeric with no urgency
+# coefficient, so it sorts nothing but the app's own "manual" mode.
+uda.order.type=numeric
+uda.order.label=Order
+RC
+  echo "    added (backup: $BACKUP):"
+  grep -nE '^[[:space:]]*uda\.order\.(type|label)[[:space:]]*=' "$RCFILE" | sed 's/^/      /'
+fi
+
 echo "==> 3/5  environment file (optional)"
 # Never written with a value. Auth is off by default on purpose: the tailnet
 # allowlist is the gate (docs/design.md D4), and a token this script invented

@@ -82,11 +82,13 @@ def is_uuid(value: str) -> bool:
     return bool(value) and bool(UUID_RE.match(value))
 
 
-def _run(args: Sequence[str], verbose: str = "nothing") -> subprocess.CompletedProcess:
+def _run(args: Sequence[str], verbose: str = "nothing",
+         extra_rc: Sequence[str] = ()) -> subprocess.CompletedProcess:
     """Blocking. Holds the lock for the life of the child process."""
     rc = list(BASE_RC)
     if verbose != "nothing":
         rc[-1] = "rc.verbose=%s" % verbose
+    rc += list(extra_rc)
     argv = [settings.task_bin, *rc, *args]
     with _LOCK:
         try:
@@ -115,8 +117,9 @@ def _check(res: subprocess.CompletedProcess, argv: Sequence[str]) -> str:
     raise TaskFailed(detail, list(argv), res.returncode)
 
 
-async def _call(args: Sequence[str], verbose: str = "nothing") -> str:
-    res = await asyncio.to_thread(_run, args, verbose)
+async def _call(args: Sequence[str], verbose: str = "nothing",
+                extra_rc: Sequence[str] = ()) -> str:
+    res = await asyncio.to_thread(_run, args, verbose, extra_rc)
     return _check(res, args)
 
 
@@ -151,6 +154,33 @@ async def get(uuid: str) -> Optional[Dict[str, Any]]:
         return None
     rows = await export(uuid)
     return rows[0] if rows else None
+
+
+async def templates() -> Dict[str, Dict[str, Any]]:
+    """uuid -> every live recurring template (`status:recurring`).
+
+    The instances on the phone are pending tasks with a `parent`; their own
+    `recur`/`until` are a snapshot from when they were spawned and do not
+    follow the template, and an instance whose template has been deleted keeps
+    both fields forever because 3.4.2 refuses to clear them. So the templates
+    are what `serialize.task_out` reads the schedule out of — see its docstring
+    for the two bugs that come of not doing this.
+    """
+    return {t["uuid"]: t for t in await export("status:recurring")}
+
+
+async def uda_order_declared() -> bool:
+    """Is `uda.order.type` set in the taskrc this server is running against?
+
+    Worth a subprocess before every `order:` write, because the failure mode is
+    silent data loss: with the UDA undeclared, `task <uuid> modify order:1500`
+    exits **0** and sets the task's DESCRIPTION to "order:1500" — the token is
+    not an attribute Taskwarrior knows, so it falls through to the description.
+    Verified on 3.4.2. deploy/install.sh adds the two lines; this is what
+    notices when it has not been run.
+    """
+    res = await asyncio.to_thread(_run, ["_get", "rc.uda.order.type"])
+    return bool(_check(res, ["_get"]).strip())
 
 
 async def blocked_uuids() -> set:
@@ -194,6 +224,30 @@ async def modify(uuid: str, attrs: Sequence[str],
     if description is not None:
         args += ["--", description]
     await _call(args)
+
+
+async def bulk_modify(filters: Sequence[str], attrs: Sequence[str]) -> int:
+    """`task <filters…> modify <attrs…>` over many tasks. -> how many matched.
+
+    Two things this has to get right, both verified on 3.4.2 and neither
+    obvious from the command line:
+
+    * **`rc.bulk=0`.** `rc.confirmation=off` does NOT cover the bulk prompt.
+      Over three pending tasks, `task project:old modify project:new` with the
+      server's usual flags asks "Modify task 1 'bulk 3'? (yes/no/all/quit)",
+      reads EOF, prints "Task not modified." and exits 1 — nothing changes and
+      the only clue is the exit code. `rc.bulk=0` means "never prompt".
+
+    * **Count first, then modify.** With no matching task the command exits 1
+      with empty output, which would surface as a 502 whose detail is the empty
+      string. Renaming a category nobody has used yet is not an error, so the
+      count is what decides whether there is anything to run.
+    """
+    matched = await export(*filters)
+    if not matched:
+        return 0
+    await _call([*filters, "modify", *attrs], extra_rc=["rc.bulk=0"])
+    return len(matched)
 
 
 async def annotate(uuid: str, text: str) -> None:

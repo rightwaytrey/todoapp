@@ -22,7 +22,7 @@ The server decides the shape on the way out: a due whose local time is exactly
 `100.64.0.0/10` (the tailnet) get `403 {"error":"forbidden"}` before anything
 else runs. If the env var `TASKMASTER_TOKEN` is set, every path except
 `/health` also requires `Authorization: Bearer <token>` (`401` otherwise). If it
-is unset, no auth. CORS: allow any origin, methods `GET,POST,PATCH,DELETE,
+is unset, no auth. CORS: allow any origin, methods `GET,POST,PUT,PATCH,DELETE,
 OPTIONS`, headers `Authorization, Content-Type, If-None-Match`, expose `ETag`
 — the app runs at `capacitor://localhost` and the dev browser at
 `http://localhost:*`.
@@ -70,8 +70,12 @@ minus the reserved maintenance tags (below), sorted.
   "due_at":      "2026-09-03T00:00:00-05:00" | null,          // the same instant
   "tags":        ["claude"],            // user tags, reserved tags stripped
   "annotations": [{"entry": <iso>, "text": "claude: looked into it"}],
-  "recur":       "daily" | null,        // set on recurring instances (parent != null)
+  "recur":       "daily" | null,        // the TEMPLATE's schedule, read through
+                                        // `parent` — see Recurrence, round 5
+  "until":       "2026-12-01" | null,   // likewise
   "parent":      "62c4db7e-…" | null,
+  "group":       "overdue"|"today"|"upcoming"|"none",   // round 5
+  "order":       1500 | null,           // the manual-order UDA; round 5
   "depends":     ["<uuid>", …],         // may be empty
   "blocked":     false,                 // true when any dependency is still pending
   "urgency":     13.48,
@@ -97,8 +101,10 @@ addressed by `uuid`.
 `GET /api/tasks` → `200 [<Task>]`.
 `?status=pending` (default) → every pending task, no filter, no context
 (`rc.context=none`), recurring **templates** excluded (they are
-`status:recurring`; their instances are pending and included). Sorted by
-`urgency` desc — the client regroups anyway.
+`status:recurring`; their instances are pending and included). ~~Sorted by
+`urgency` desc — the client regroups anyway.~~ **Superseded in round 5:** the
+pending half comes out in display order, and each task carries `group` and
+`order`. See "Ordering moves to the server" below.
 `?status=completed` → tasks completed in the last 30 days, newest `end` first,
 capped at 200.
 `?status=all` → both, pending first.
@@ -358,3 +364,233 @@ don't work" with nothing pointing at the token. So `app/middleware.py` exempts
 What they expose to something already on the tailnet is a zip of
 `www/index.html` — the same file already inside the app binary, no secrets in
 it.
+
+## Preferences, ordering, recurrence, categories, widget (round 5, 2026-09-04)
+
+*Planner's contract. Server, client and widget build to this; whoever must
+deviate edits this section first and says so.*
+
+### Preferences — `GET /api/prefs`, `PUT /api/prefs`
+
+One JSON document, stored by the server at `$TASKMASTER_PREFS`
+(default `~/.config/taskmaster/prefs.json`, atomic writes). `PUT` replaces the
+whole document (validated; unknown keys dropped; 422 names the field).
+Defaults apply for anything missing:
+
+```
+{
+  "categories": { "order": ["personal","work","claude","fun","inbox"], "hidden": [] },
+  "chips":      { "order": ["p:personal","p:work","p:claude","p:fun","p:inbox","t:claude","t:alert"],
+                  "hidden": [] },                 // "p:<category>" | "t:<tag>"; unknown ones are ignored
+  "sort":       { "mode": "due" },                 // "due" | "priority" | "urgency" | "manual"
+  "widget":     { "groups": ["overdue","today"],   // any of overdue,today,upcoming,none
+                  "upcoming_days": 7,              // when "upcoming" is in groups
+                  "category": null,                // null = all, else one category name
+                  "rows": { "small": 3, "medium": 5, "large": 12 },
+                  "show_category": false }
+}
+```
+
+### Ordering moves to the server
+
+`GET /api/tasks` (pending) now returns tasks **already in display order** and
+each Task gains `"group": "overdue"|"today"|"upcoming"|"none"` (the client's
+`groupOf()` rule, evaluated in the server's zone) and `"order": number|null`
+(a Taskwarrior numeric UDA `order`, see below). Display order within a group:
+
+- `sort.mode = "due"` (default): the canonical key from "Canonical order".
+- `"priority"`: priority H>M>L>none first, then the canonical key.
+- `"urgency"`: Taskwarrior `urgency` desc, then uuid.
+- `"manual"`: tasks with `order` set first, ascending; the rest by the canonical key.
+In every mode a non-null `order` wins inside its group when the mode is
+`manual`; the other modes ignore it. Clients render in the order received and
+only re-sort locally for optimistic rows (same rules, best effort).
+
+`PATCH /api/tasks/{uuid}` accepts `"order": number|null`. Drag-to-reorder sends
+the moved task a midpoint between its new neighbours' `order` values (the
+client assigns 1000-spaced integers to a group the first time it is reordered,
+one PATCH per task that changed). The UDA is declared in the user's `.taskrc`
+(`uda.order.type=numeric`, `uda.order.label=Order`) — the server's install
+script adds it if missing; tests declare it in their temp taskrc.
+
+> **Added by the server, 2026-09-04 — `order` is refused when the UDA is not
+> declared.** `PATCH {"order": …}` (a number *or* `null`) answers
+> `409 {"error":"conflict"}` naming the two `.taskrc` lines, unless
+> `task _get rc.uda.order.type` is non-empty. Verified on 3.4.2: with the UDA
+> undeclared, `task <uuid> modify order:1500` exits **0** and sets the task's
+> **description** to `"order:1500"` — the token is not an attribute Taskwarrior
+> knows, so it falls through to the text — and `modify order:` sets it to
+> `"order:"`. One drag would shred a screenful of real tasks, so the write is
+> refused rather than attempted.
+>
+> An integral `order` comes back as an integer (`1500`, not `1500.0`).
+> Taskwarrior is not consistent about which it exports for the same value, so
+> the server normalises; a drag midpoint (`1250.5`) stays a float.
+
+### Recurrence
+
+Task gains `"until": "YYYY-MM-DD"|null`. `PATCH` accepts
+`"recur": string|null` — one of `daily`, `weekdays`, `weekly`, `biweekly`,
+`monthly`, `yearly`, or any Taskwarrior period Taskwarrior accepts — and
+`"until": "YYYY-MM-DD"|null`. Semantics, all verified against the real `task`
+in the tests:
+
+- On a recurring **instance** (`parent` set): the change is applied to the
+  parent template (`task <parent> modify recur:… until:…`); the response is the
+  instance re-read. ~~(`recur` on instances mirrors the template)~~ — **it does
+  not**, see the note below.
+- On a plain pending task with a `due`: `recur:<value>` turns it into a
+  template; Taskwarrior then spawns the first instance. The response is the
+  **first instance** (status pending, `parent` set), and the client should
+  replace the task it had with it. Without a `due` → 422 `invalid_request`
+  ("recurrence needs a due date").
+- `recur: null` on an instance = stop repeating: the parent template is
+  deleted (`task <parent> delete`, confirmation off) and the current instance is
+  kept as a plain task (~~`modify parent: recur: imask:` as far as Taskwarrior
+  allows~~ — see below; the answer is "none of it"). ~~Other pending instances
+  of that template are deleted with the template.~~ — they are not, and on
+  `recurrence.limit=1` there is only ever one.
+
+> **Server's findings on Taskwarrior 3.4.2, 2026-09-04.** All of this was run
+> against the real binary in a throwaway data dir and is pinned by
+> `server/tests/test_recurrence.py`; the tests fail if a Taskwarrior upgrade
+> changes any of it.
+>
+> **1. `recur`/`until` on an instance are a snapshot, not a mirror.** After
+> `task <template> modify recur:weekly until:2026-12-01`, the pending instance
+> still exports `recur:daily` and no `until` at all. Reading them off the
+> instance would show the user the schedule they had just replaced, so **the
+> server reports `recur` and `until` from the parent template** (one extra
+> `status:recurring` export per response, and only when some row has a
+> `parent`).
+>
+> **2. Stopping cannot be spelled on the instance.**
+> - `task <instance> modify recur:` → exit 2, *"You cannot remove the recurrence
+>   from a recurring task."* `task import` with the field stripped out hits the
+>   same check and is refused too.
+> - `task <instance> modify parent:` → exit 0, and it is **harmful**: the
+>   instance is promoted to a live `status:recurring` template and immediately
+>   spawns a *fresh* instance. The row the user asked to keep leaves the pending
+>   list; the series they asked to stop carries on.
+> - `task <instance> modify imask:` → exit 0, and changes nothing that matters.
+>
+> So **"stop repeating" is `task <parent> delete` and nothing else.** That is
+> enough: the surviving instance never spawns another (completing it produces
+> nothing — verified), which is the behaviour the user asked for.
+>
+> **3. What remains, and what the API does about it.** In Taskwarrior's own
+> records the stopped instance keeps `recur:daily` and a `parent` pointing at
+> the now-deleted template, permanently. Since that state is unreachable and
+> means nothing, **the server reports an instance whose template is gone as a
+> plain task**: `recur`, `until` and `parent` all come back `null`. Without
+> that, "stop repeating" would appear to do nothing — the row would say it
+> repeats forever. A terminal `task <uuid> info` still shows the residue.
+>
+> **4. Deleting the template leaves other pending instances alone** (exit 0,
+> instance untouched). With `recurrence.limit=1` — the default, and what this
+> box runs — Taskwarrior only ever materialises one instance ahead, so in
+> practice there is exactly one and it is the one being kept.
+>
+> **5. Starting again on a stopped task needs the parent cleared.**
+> `modify recur:weekly` on a task that still carries a dead `parent` writes the
+> field and spawns nothing, because a task with a `parent` is an instance, not
+> a template. So the promotion path sends `parent: imask: recur:<value>`
+> together, and that does produce a template and an instance. The response is
+> the new instance, exactly as for a plain task.
+>
+> **6. `recur` without a `due`** exits 2 (*"You cannot specify a recurring task
+> without a due date."*). The server checks first and answers the `422` the
+> contract names. A `due` sent in the same PATCH counts.
+>
+> **7. An unsupported period** (`recur:bogusly`) exits 2 with *"The duration
+> value 'bogusly' is not supported."*, which surfaces as the usual
+> `502 task_failed` carrying the CLI's own words — the contract's "any
+> Taskwarrior period Taskwarrior accepts" is enforced by Taskwarrior. The
+> server only checks the token is `^[A-Za-z0-9]{1,20}$` before it reaches argv.
+>
+> **Periods are case-sensitive in both directions and the server folds
+> neither.** `P1M` and `P10D` (ISO-8601) are accepted while `p1m` is not;
+> `weekly`, `daily`, `weekdays`, `biweekly`, `monthly`, `yearly`, `3days` and
+> `2w` are accepted while `Weekly` is not. Lower-casing would break the ISO
+> forms and upper-casing would break the named ones, so the string is passed
+> through exactly as sent. Clients should send the lower-case named periods.
+>
+> **9. `until` in the past** is accepted and does what it says: Taskwarrior
+> spawns the instance and then reaps it, so the `200` describes a task that is
+> gone by the next `GET /api/tasks`. Not guarded — "repeat until yesterday" is
+> a coherent thing to have asked for — and the client refreshes after every
+> write anyway (design.md D6), so the row does not linger.
+>
+> **8. `recur: null` addressed at a template itself** (not something the phone
+> can reach — templates are in no list) deletes that template.
+
+### Categories
+
+`GET /api/meta` gains `"categories": [{name, count, hidden}]` in prefs order
+(hidden ones included, flagged), followed by in-use categories not in the
+order list. `count` is **pending** tasks — it is the number the filter chip
+shows (design.md D9) — so a category only completed tasks use is listed with
+`count: 0` rather than dropped. `projects` is unchanged, for the round-4
+clients still reading it.
+
+`POST /api/categories/rename` `{"from","to"}` → `204`
+(~~`task project:<from> modify project:<to>`~~ — see below — over all
+non-deleted tasks, bulk confirmation off; prefs order/hidden renamed too).
+`POST /api/categories/delete` `{"name", "move_to": string|null}` → `204`
+(tasks move to `move_to` or lose their category; removed from prefs).
+Names match `^[A-Za-z0-9_.-]{1,40}$`. `move_to` equal to `name` is `422`.
+
+> **Server's findings, 2026-09-04.** The command in the line above is not safe
+> as written; the server runs
+> `task rc.bulk=0 status.not:deleted project.is:<from> modify project:<to>`.
+> Three reasons, all verified on 3.4.2:
+>
+> - **`project.is:`, not `project:`.** Taskwarrior attribute filters are
+>   **prefix matches**: `task project:work modify project:job` also renames
+>   `workshop` and `work.sub`. On the real database that is silent data loss.
+> - **`rc.bulk=0`.** `rc.confirmation=off` does *not* cover the bulk prompt.
+>   Over five tasks the modify asks *"Modify task 1 …? (yes/no/all/quit)"*,
+>   reads EOF, prints "Task not modified." and exits **1** having changed
+>   nothing — with the server's usual flags and no other clue than the exit
+>   code.
+> - **Count first.** With no matching task the modify exits 1 with empty
+>   output, which would surface as a `502` whose `detail` is the empty string.
+>   Renaming a category nobody has used yet is not an error — the prefs rename
+>   is the point of the call — so a match count decides whether to run it.
+>
+> Renaming also moves the `p:<name>` filter chips and `widget.category`; a
+> chip or a widget filter pointing at a category that no longer exists shows an
+> empty screen with nothing to explain it. Deleting removes them (the widget
+> filter follows `move_to`, or clears).
+
+### Widget feed — `GET /api/widget`
+
+The server applies `prefs.widget` and returns what the widget draws, nothing
+else: `{"updated": iso, "total": int, "rows": [{uuid, text, due, overdue,
+group, category}]}` — `due` is the label ("overdue" | "today" | "2:30 pm" |
+"Thu Sep 4" | ""), `text` is the description flattened to one line, rows are
+already in display order and limited to `prefs.widget.rows.large` (the widget
+truncates further per family using the caps, which the response echoes as
+`"caps": {"small": 3, "medium": 5, "large": 12}` — a separate key, since
+`rows` is the array). Same allowlist/token rules as
+`/api/tasks`. The widget stops sorting or classifying anything.
+
+`category` is the row's category **only when `prefs.widget.show_category` is
+true**, and `""` otherwise: the widget draws it whenever the string is
+non-empty and has no other way to read the pref. An uncategorised task is `""`
+either way.
+
+`total` is the count **behind** the `rows.large` cap — what "+N more" counts up
+to. `updated` is the server's clock, local with offset.
+
+The `upcoming` window is a **date** comparison, like everything else that
+touches `due` (design.md D3): `upcoming_days: 7` means "on or before the date
+seven days from today", so a task due at 09:00 on the seventh day is in for the
+whole of that day rather than falling out at lunchtime. It bounds only the
+`upcoming` group; `overdue`, `today` and `none` are unaffected by it.
+
+Labels in full, matching the client's `dueLabel()`: `""` (no due), `"overdue"`,
+`"today"` (date-only today), `"2:30 pm"` (clocked today, still to come),
+`"Tomorrow"` / `"Tomorrow · 2:30 pm"`, `"Thu Sep 10"` (date-only, weekday
+carried), `"Sep 12 · 2:30 pm"` (clocked, weekday dropped so the row stays one
+line), and `"Sat Jan 2, 2027"` once the year differs.

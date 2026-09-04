@@ -23,6 +23,7 @@ contract is docs/api.md, and where this file disagrees with it, it is wrong.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import re
@@ -49,9 +50,198 @@ DUE_CLOCK_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
 # The `pa` projects, always present and in this order, then anything else.
 PA_PROJECTS = ["personal", "work", "claude", "fun", "inbox"]
 
+# A chip value is namespaced because `claude` is both a project and a tag
+# (api.md, prefs.chips).
+CHIP_RE = re.compile(r"^[pt]:[A-Za-z0-9_.-]{1,40}$")
+# A Taskwarrior period: `daily`, `weekly`, `3d`, `2w`. The real server hands
+# whatever this admits to Taskwarrior, which is the actual authority; this only
+# keeps obvious rubbish off the argv.
+RECUR_RE = re.compile(r"^[0-9]*[a-z]+$")
+SORT_MODES = ("due", "priority", "urgency", "manual")
+WIDGET_GROUPS = ("overdue", "today", "upcoming", "none")
+# Bounds on the widget's per-family row counts. The client's steppers use the
+# same numbers, and they are what the widget can actually DRAW at each family
+# size, not what the feed could carry: a medium set to 8 would clip four rows
+# off the bottom, and a family set to 0 would be a blank widget.
+ROW_BOUNDS = {"small": (1, 3), "medium": (1, 5), "large": (1, 12)}
+
+DEFAULT_PREFS = {
+    "categories": {"order": list(PA_PROJECTS), "hidden": []},
+    "chips": {"order": ["p:" + p for p in PA_PROJECTS] + ["t:claude", "t:alert"],
+              "hidden": []},
+    "sort": {"mode": "due"},
+    "widget": {"groups": ["overdue", "today"], "upcoming_days": 7,
+               "category": None,
+               "rows": {"small": 3, "medium": 5, "large": 12},
+               "show_category": False},
+}
+
 LOCK = threading.Lock()
 TASKS = {}          # uuid -> task dict
+PREFS = copy.deepcopy(DEFAULT_PREFS)
 LATENCY_MS = 0
+
+
+# ---------------------------------------------------------------------------
+# preferences (api.md, "Preferences")
+# ---------------------------------------------------------------------------
+# PUT replaces the whole document, so every editor in the client has to
+# read-modify-write. Validation drops unknown keys rather than refusing them
+# (the contract's rule for a body key the server does not know) and 422s with
+# the field named for a value it cannot use.
+
+def _str_list(v, field, rx):
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise ApiError(422, "invalid_request", "%s must be a list of strings" % field)
+    out = []
+    for x in v:
+        if not isinstance(x, str) or not rx.match(x):
+            raise ApiError(422, "invalid_request",
+                           "%s entries must match %s" % (field, rx.pattern))
+        if x not in out:
+            out.append(x)
+    return out
+
+
+def _int_in(v, field, lo, hi, dflt):
+    if v is None:
+        return dflt
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ApiError(422, "invalid_request", "%s must be an integer" % field)
+    if v < lo or v > hi:
+        raise ApiError(422, "invalid_request",
+                       "%s must be between %d and %d" % (field, lo, hi))
+    return v
+
+
+def clean_prefs(body):
+    """The whole document, validated. Anything missing takes its default."""
+    if not isinstance(body, dict):
+        raise ApiError(400, "bad_request", "body must be a JSON object")
+    d = copy.deepcopy(DEFAULT_PREFS)
+
+    cats = body.get("categories") or {}
+    if not isinstance(cats, dict):
+        raise ApiError(422, "invalid_request", "categories must be an object")
+    d["categories"]["order"] = _str_list(cats.get("order", d["categories"]["order"]),
+                                         "categories.order", PROJECT_RE)
+    d["categories"]["hidden"] = _str_list(cats.get("hidden", []),
+                                          "categories.hidden", PROJECT_RE)
+
+    chips = body.get("chips") or {}
+    if not isinstance(chips, dict):
+        raise ApiError(422, "invalid_request", "chips must be an object")
+    d["chips"]["order"] = _str_list(chips.get("order", d["chips"]["order"]),
+                                    "chips.order", CHIP_RE)
+    d["chips"]["hidden"] = _str_list(chips.get("hidden", []), "chips.hidden", CHIP_RE)
+
+    srt = body.get("sort") or {}
+    if not isinstance(srt, dict):
+        raise ApiError(422, "invalid_request", "sort must be an object")
+    mode = srt.get("mode", "due")
+    if mode not in SORT_MODES:
+        raise ApiError(422, "invalid_request",
+                       "sort.mode must be one of " + ", ".join(SORT_MODES))
+    d["sort"]["mode"] = mode
+
+    w = body.get("widget") or {}
+    if not isinstance(w, dict):
+        raise ApiError(422, "invalid_request", "widget must be an object")
+    groups = w.get("groups", d["widget"]["groups"])
+    if not isinstance(groups, list) or any(g not in WIDGET_GROUPS for g in groups):
+        raise ApiError(422, "invalid_request",
+                       "widget.groups must be a list of " + ", ".join(WIDGET_GROUPS))
+    # Kept in the canonical order whatever order they arrive in: they are a set,
+    # and the feed is built group by group.
+    d["widget"]["groups"] = [g for g in WIDGET_GROUPS if g in groups]
+    d["widget"]["upcoming_days"] = _int_in(w.get("upcoming_days"),
+                                           "widget.upcoming_days", 1, 60, 7)
+    cat = w.get("category")
+    if cat is not None and not (isinstance(cat, str) and PROJECT_RE.match(cat)):
+        raise ApiError(422, "invalid_request",
+                       "widget.category must be a category name or null")
+    d["widget"]["category"] = cat
+    rows = w.get("rows") or {}
+    if not isinstance(rows, dict):
+        raise ApiError(422, "invalid_request", "widget.rows must be an object")
+    for fam, (lo, hi) in ROW_BOUNDS.items():
+        d["widget"]["rows"][fam] = _int_in(rows.get(fam), "widget.rows." + fam,
+                                           lo, hi, DEFAULT_PREFS["widget"]["rows"][fam])
+    sc = w.get("show_category", False)
+    if not isinstance(sc, bool):
+        raise ApiError(422, "invalid_request", "widget.show_category must be a boolean")
+    d["widget"]["show_category"] = sc
+    return d
+
+
+def prefs_rename_category(old, new):
+    """Keep the prefs pointing at a category that has just been renamed."""
+    for key, pfx in (("categories", ""), ("chips", "p:")):
+        for field in ("order", "hidden"):
+            seq = PREFS[key][field]
+            PREFS[key][field] = []
+            for x in seq:
+                x = (pfx + new) if x == pfx + old else x
+                if x not in PREFS[key][field]:
+                    PREFS[key][field].append(x)
+
+
+def prefs_forget_category(name):
+    for key, pfx in (("categories", ""), ("chips", "p:")):
+        for field in ("order", "hidden"):
+            PREFS[key][field] = [x for x in PREFS[key][field] if x != pfx + name]
+
+
+# ---------------------------------------------------------------------------
+# grouping and display order (api.md, "Ordering moves to the server")
+# ---------------------------------------------------------------------------
+# The client used to do all of this; it now renders what arrives. The rule is
+# still the one in design.md D8 -- so this and www/index.html's groupOf() /
+# orderKey() have to say the same thing, and the client's copy is the fallback
+# for optimistic rows and for a cached list with no server ordering on it.
+
+GROUP_RANK = {"overdue": 0, "today": 1, "upcoming": 2, "none": 3}
+PRIO_RANK = {"H": "0", "M": "1", "L": "2"}
+
+
+def group_of(t):
+    due = t.get("due")
+    if not due:
+        return "none"
+    day, today = due[:10], local_date(0)
+    if day < today:
+        return "overdue"
+    if day > today:
+        return "upcoming"
+    clock = due[11:16] if "T" in due else None
+    return "overdue" if (clock and clock <= now().strftime("%H:%M")) else "today"
+
+
+def canon_key(t):
+    """<date>T<HH:MM|99:99><prio><uuid> -- api.md "Canonical order"."""
+    due = t.get("due") or ""
+    clock = due[11:16] if "T" in due else "99:99"
+    return (due[:10] + "T" + clock +
+            PRIO_RANK.get(t.get("priority"), "3") + t["uuid"])
+
+
+def sort_key(t, mode):
+    g = GROUP_RANK[group_of(t)]
+    order = t.get("order")
+    if mode == "manual":
+        return (g, 0 if order is not None else 1,
+                float(order if order is not None else 0), canon_key(t))
+    if mode == "priority":
+        return (g, PRIO_RANK.get(t.get("priority"), "3"), canon_key(t))
+    if mode == "urgency":
+        return (g, -float(t.get("urgency") or 0), t["uuid"])
+    # "due": the canonical key, except in the no-date group where there is no
+    # date to lead with and urgency leads instead.
+    if g == GROUP_RANK["none"]:
+        return (g, -float(t.get("urgency") or 0), canon_key(t))
+    return (g, 0.0, canon_key(t))
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +302,13 @@ def make_task(description, **kw):
         "tags": [],
         "annotations": [],
         "recur": None,
+        "until": None,
         "parent": None,
         "depends": [],
         "blocked": False,
         "urgency": 1.0,
+        # The `order` UDA (api.md): null until the group is dragged once.
+        "order": None,
         "entry": iso(now() - timedelta(days=3)),
         "modified": iso(now()),
         "end": None,
@@ -159,9 +352,17 @@ def seed():
     else:
         today_clock = later.strftime("%Y-%m-%dT%H:%M")
 
-    plants_parent = str(uuidlib.uuid4())
+    # A REAL recurring template, not just a parent uuid: the Repeat picker in
+    # the detail sheet edits the template (api.md), and "stop repeating"
+    # deletes it, so it has to exist to be edited. status:recurring keeps it
+    # out of the pending list, exactly as Taskwarrior does.
+    plants_tmpl = make_task("water the plants", project="personal",
+                            status="recurring", due=local_date(0), recur="daily",
+                            urgency=11.4)
+    plants_parent = plants_tmpl["uuid"]
 
     rows = [
+        plants_tmpl,
         # --- overdue (2, one of them clocked) --------------------------------
         make_task("renew the car tabs before they lapse",
                   project="personal", priority="H", due=local_date(-4),
@@ -192,14 +393,24 @@ def seed():
                   project="personal", due=local_date(0), tags=["button"],
                   urgency=10.84),
         # --- upcoming (3) -----------------------------------------------------
+        # The three upcoming tasks carry an `order` UDA, so switching Settings
+        # to "Manual" visibly re-orders this group (campsite, summary, lags)
+        # against the due-date order (summary, lags, campsite) without anything
+        # having to be dragged first.
         make_task("write the quarterly summary", project="work", priority="M",
-                  due=local_date(2), urgency=9.8,
+                  due=local_date(2), urgency=9.8, order=2000,
                   annotations=[{"entry": iso(n - timedelta(days=1)),
                                 "text": "outline is in ~/notes/q3.md"}]),
         make_task("look into why the widget feed lags", project="claude",
-                  due=local_date(4), tags=["claude"], urgency=8.6),
+                  due=local_date(4), tags=["claude"], urgency=8.6, order=3000),
         make_task("book the campsite for October", project="fun",
-                  priority="L", due=local_date(10) + "T14:30", urgency=7.2),
+                  priority="L", due=local_date(10) + "T14:30", urgency=7.2,
+                  order=1000),
+        # Two categories the `pa` five do not contain, so the Categories and
+        # Filters editors have rows that can be renamed and deleted without
+        # touching one `pa` maintains.
+        make_task("prune the hydrangea before the frost", project="garden",
+                  due=local_date(6), urgency=6.1),
         # --- no date (3) ------------------------------------------------------
         make_task("read the Taskwarrior 3.x migration notes", project="inbox",
                   urgency=3.1),
@@ -207,10 +418,14 @@ def seed():
                   priority="L", urgency=2.4),
         make_task("replace the kitchen tap washer", project="personal",
                   urgency=1.8),
+        make_task("post the parcel back to the shop", project="errands",
+                  priority="M", urgency=2.9),
     ]
 
     # One blocked task: it depends on the tap washer above, which is pending.
-    washer = rows[-1]
+    # By name rather than by position -- rows[-1] moved once already when a
+    # task was appended after it, and silently re-pointed this dependency.
+    washer = next(t for t in rows if t["description"].startswith("replace the kitchen"))
     blocked = make_task("fix the drip under the sink", project="personal",
                         priority="M", due=local_date(3),
                         depends=[washer["uuid"]], blocked=True, urgency=8.0)
@@ -249,6 +464,10 @@ def public(t):
     c = dict(t)
     c["tags"] = [x for x in t.get("tags", []) if x not in RESERVED_TAGS]
     c["annotations"] = [dict(a) for a in t.get("annotations", [])]
+    # `group` is the server's answer to "which heading does this go under"
+    # (api.md, "Ordering moves to the server"). It is only meaningful for a
+    # task that is still on the Tasks screen; the Done tab groups by day.
+    c["group"] = group_of(t) if t["status"] in ("pending", "waiting") else None
     return c
 
 
@@ -262,13 +481,83 @@ def list_tasks(status):
                and t["end"] and datetime.fromisoformat(t["end"]) >= cutoff]
         out.sort(key=lambda t: t["end"], reverse=True)
         return [public(t) for t in out[:200]]
+    # Already in DISPLAY order, per prefs.sort.mode: the client renders what
+    # arrives and only re-sorts optimistic rows (api.md, "Ordering moves to
+    # the server"). Recurring templates are status:recurring and so are
+    # excluded here by the same filter that always excluded them.
+    with LOCK:
+        mode = PREFS["sort"]["mode"]
     pending = [t for t in rows if t["status"] == "pending"]
-    pending.sort(key=lambda t: t["urgency"], reverse=True)
+    pending.sort(key=lambda t: sort_key(t, mode))
     if status == "all":
         comp = [t for t in rows if t["status"] == "completed"]
         comp.sort(key=lambda t: t["end"] or "", reverse=True)
         return [public(t) for t in pending + comp]
     return [public(t) for t in pending]
+
+
+# ---------------------------------------------------------------------------
+# the widget feed (api.md, "Widget feed")
+# ---------------------------------------------------------------------------
+# The server applies prefs.widget and hands over exactly what the widget
+# draws. The widget stops sorting and stops classifying: two implementations of
+# the canonical order is the bug design.md D8 exists to close.
+
+def fmt_clock(hhmm):
+    h, m = int(hhmm[:2]), hhmm[3:5]
+    return "%d:%s %s" % ((h % 12) or 12, m, "am" if h < 12 else "pm")
+
+
+def widget_due_label(t):
+    due = t.get("due")
+    if not due:
+        return ""
+    g = group_of(t)
+    if g == "overdue":
+        return "overdue"
+    clock = due[11:16] if "T" in due else None
+    if g == "today":
+        return fmt_clock(clock) if clock else "today"
+    d = datetime.strptime(due[:10], "%Y-%m-%d")
+    return "%s %s %d" % (d.strftime("%a"), d.strftime("%b"), d.day)
+
+
+def widget_feed():
+    with LOCK:
+        w = copy.deepcopy(PREFS["widget"])
+        mode = PREFS["sort"]["mode"]
+        rows = [t for t in TASKS.values() if t["status"] == "pending"]
+    horizon = local_date(w["upcoming_days"])
+    keep = []
+    for t in rows:
+        g = group_of(t)
+        if g not in w["groups"]:
+            continue
+        if g == "upcoming" and (t.get("due") or "")[:10] > horizon:
+            continue
+        if w["category"] and (t.get("project") or None) != w["category"]:
+            continue
+        keep.append(t)
+    keep.sort(key=lambda t: sort_key(t, mode))
+    cap = w["rows"]["large"]
+    out = []
+    for t in keep[:cap]:
+        g = group_of(t)
+        out.append({
+            "uuid": t["uuid"],
+            # One line: a description may carry newlines (api.md) and a widget
+            # row is one line high.
+            "text": " ".join(str(t["description"]).split()),
+            "due": widget_due_label(t),
+            "overdue": g == "overdue",
+            "group": g,
+            # Only when the widget is actually going to draw it: an empty
+            # string, not a name, is what "do not show the category" looks
+            # like on the wire, so the widget has no decision left to make.
+            "category": (t.get("project") or "") if w["show_category"] else "",
+        })
+    return {"updated": iso(now()), "total": len(keep), "rows": out,
+            "caps": w["rows"]}
 
 
 def clean_tags(v, field="tags"):
@@ -337,8 +626,97 @@ def apply_fields(t, body, creating):
         keep = [x for x in t.get("tags", []) if x in RESERVED_TAGS]
         t["tags"] = keep + clean_tags(body["tags"])
 
+    if "order" in body:
+        o = body["order"]
+        if o is None:
+            t["order"] = None
+        elif isinstance(o, (int, float)) and not isinstance(o, bool):
+            t["order"] = o
+        else:
+            raise ApiError(422, "invalid_request", "order must be a number or null")
+
     t["modified"] = iso(now())
     return t
+
+
+# ---------------------------------------------------------------------------
+# recurrence (api.md, "Recurrence")
+# ---------------------------------------------------------------------------
+# Three shapes, and the middle one is why this cannot live in apply_fields():
+# turning a plain task into a template makes Taskwarrior spawn an instance, and
+# the response is that INSTANCE -- a different uuid from the one that was
+# patched. The client replaces the row it had with it.
+
+_ABSENT = object()
+
+
+def apply_recurrence(t, body):
+    """Returns the task the PATCH should answer with -- not always `t`."""
+    recur = body.get("recur", _ABSENT)
+    until = body.get("until", _ABSENT)
+
+    if until is not _ABSENT and until is not None:
+        if not isinstance(until, str) or not DUE_DATE_RE.match(until):
+            raise ApiError(422, "invalid_request", "until must be YYYY-MM-DD or null")
+    if recur is not _ABSENT and recur is not None:
+        if not isinstance(recur, str) or not RECUR_RE.match(recur.strip().lower()):
+            raise ApiError(422, "invalid_request",
+                           "recur must be a period like daily, weekly or 3d, or null")
+        recur = recur.strip().lower()
+
+    tmpl = TASKS.get(t["parent"]) if t.get("parent") else None
+
+    if recur is _ABSENT:
+        if until is not _ABSENT:
+            t["until"] = until
+            if tmpl:
+                tmpl["until"] = until
+        return t
+
+    if recur is None:
+        # Stop repeating: the template goes, and so do its other pending
+        # instances; THIS instance stays, as a plain task.
+        if tmpl:
+            for other in list(TASKS.values()):
+                if (other.get("parent") == tmpl["uuid"] and other["uuid"] != t["uuid"]
+                        and other["status"] == "pending"):
+                    other["status"] = "deleted"
+                    other["end"] = iso(now())
+            tmpl["status"] = "deleted"
+            tmpl["end"] = iso(now())
+            t["parent"] = None
+        t["recur"] = None
+        t["until"] = None
+        return t
+
+    if tmpl:
+        # The change belongs to the template; the instance mirrors it.
+        tmpl["recur"] = recur
+        t["recur"] = recur
+        if until is not _ABSENT:
+            tmpl["until"] = until
+            t["until"] = until
+        return t
+
+    # A plain task becomes a template. Taskwarrior needs a due date to have
+    # anything to recur from.
+    if not t.get("due"):
+        raise ApiError(422, "invalid_request", "recurrence needs a due date")
+    t["status"] = "recurring"
+    t["recur"] = recur
+    if until is not _ABSENT:
+        t["until"] = until
+    inst = dict(t)
+    inst["uuid"] = str(uuidlib.uuid4())
+    inst["status"] = "pending"
+    inst["parent"] = t["uuid"]
+    inst["tags"] = list(t.get("tags", []))
+    inst["depends"] = list(t.get("depends", []))
+    inst["annotations"] = [dict(a) for a in t.get("annotations", [])]
+    inst["entry"] = iso(now())
+    inst["modified"] = iso(now())
+    TASKS[inst["uuid"]] = inst
+    return inst
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -351,8 +729,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
+        # PUT is here for /api/prefs. A browser preflights it exactly as it
+        # preflights PATCH, so a server that leaves it out of this list has an
+        # app that cannot save a single preference and no clue why.
         self.send_header("Access-Control-Allow-Methods",
-                         "GET,POST,PATCH,DELETE,OPTIONS")
+                         "GET,POST,PUT,PATCH,DELETE,OPTIONS")
         self.send_header("Access-Control-Allow-Headers",
                          "Authorization, Content-Type, If-None-Match")
         self.send_header("Access-Control-Expose-Headers", "ETag")
@@ -417,6 +798,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._dispatch("POST")
 
+    def do_PUT(self):
+        self._dispatch("PUT")
+
     def do_PATCH(self):
         self._dispatch("PATCH")
 
@@ -457,10 +841,79 @@ class Handler(BaseHTTPRequestHandler):
                              if t["project"] and t["project"] not in PA_PROJECTS})
             tags = sorted({x for t in rows if t["status"] == "pending"
                            for x in t["tags"] if x not in RESERVED_TAGS})
+            # `categories` is the list the Settings editor drives: prefs order
+            # first (hidden ones INCLUDED and flagged -- an editor that cannot
+            # see a hidden category cannot unhide it), then anything in use
+            # that the order list has not heard of (api.md).
+            with LOCK:
+                order = list(PREFS["categories"]["order"])
+                hidden = set(PREFS["categories"]["hidden"])
+            counts = {}
+            for t in rows:
+                if t["project"] and t["status"] == "pending":
+                    counts[t["project"]] = counts.get(t["project"], 0) + 1
+            names = list(order)
+            for p in PA_PROJECTS + others:
+                if p not in names:
+                    names.append(p)
+            cats = [{"name": p, "count": counts.get(p, 0), "hidden": p in hidden}
+                    for p in names]
             return self._send(200, {
                 "projects": PA_PROJECTS + others, "tags": tags,
+                "categories": cats,
                 "priorities": ["H", "M", "L"], "tz": TZ_NAME, "now": iso(now()),
             })
+
+        if path == "/api/prefs" and method == "GET":
+            with LOCK:
+                return self._send(200, copy.deepcopy(PREFS))
+
+        if path == "/api/prefs" and method == "PUT":
+            # PUT REPLACES the document: every editor in the client
+            # read-modify-writes the whole thing. The stored (normalised)
+            # document comes back so the client can adopt what the server
+            # actually kept rather than what it hoped it sent.
+            doc = clean_prefs(self._body())
+            with LOCK:
+                PREFS.clear()
+                PREFS.update(doc)
+                return self._send(200, copy.deepcopy(PREFS))
+
+        if path == "/api/categories/rename" and method == "POST":
+            body = self._body()
+            src, dst = body.get("from"), body.get("to")
+            for field, v in (("from", src), ("to", dst)):
+                if not isinstance(v, str) or not PROJECT_RE.match(v):
+                    raise ApiError(422, "invalid_request",
+                                   "%s must match ^[A-Za-z0-9_.-]{1,40}$" % field)
+            with LOCK:
+                for t in TASKS.values():
+                    if t["status"] != "deleted" and t["project"] == src:
+                        t["project"] = dst
+                        t["modified"] = iso(now())
+                prefs_rename_category(src, dst)
+            return self._send(204, None)
+
+        if path == "/api/categories/delete" and method == "POST":
+            body = self._body()
+            name, move_to = body.get("name"), body.get("move_to")
+            if not isinstance(name, str) or not PROJECT_RE.match(name):
+                raise ApiError(422, "invalid_request",
+                               "name must match ^[A-Za-z0-9_.-]{1,40}$")
+            if move_to is not None and not (isinstance(move_to, str)
+                                            and PROJECT_RE.match(move_to)):
+                raise ApiError(422, "invalid_request",
+                               "move_to must be a category name or null")
+            with LOCK:
+                for t in TASKS.values():
+                    if t["status"] != "deleted" and t["project"] == name:
+                        t["project"] = move_to
+                        t["modified"] = iso(now())
+                prefs_forget_category(name)
+            return self._send(204, None)
+
+        if path == "/api/widget" and method == "GET":
+            return self._send(200, widget_feed())
 
         if path == "/api/tasks" and method == "GET":
             status = params.get("status") or "pending"
@@ -509,9 +962,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, public(t))
 
             if sub == "" and method == "PATCH":
+                body = self._body()
                 with LOCK:
-                    apply_fields(t, self._body(), creating=False)
-                return self._send(200, public(t))
+                    apply_fields(t, body, creating=False)
+                    # recur/until can answer with a DIFFERENT task: a plain
+                    # task that becomes a template answers with its first
+                    # instance, which has its own uuid (api.md).
+                    answer = apply_recurrence(t, body)
+                return self._send(200, public(answer))
 
             if sub == "" and method == "DELETE":
                 # Taskwarrior keeps the record (and stamps `end`); so do we.

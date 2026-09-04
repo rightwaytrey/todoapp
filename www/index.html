@@ -566,6 +566,88 @@
     border-top: 1px solid var(--line); margin-top: 22px;
   }
 
+  /* ---- preference editors (Settings) ----------------------------------- */
+  /* Categories, Filters, Widget and Sort are all the same shape: a card of
+     rows, each row a name and a little cluster of controls. On a 390pt screen
+     the cluster does not fit beside the name, so the row WRAPS -- name on the
+     first line, controls on the second -- rather than shrinking the controls
+     below the 44px they have to keep. */
+  .prefs {
+    border: 1px solid var(--line); border-radius: 12px; background: var(--card);
+    overflow: hidden; margin-top: 8px;
+  }
+  .prefrow {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px;
+    padding: 7px 10px; border-bottom: 1px solid var(--line);
+    min-height: 52px; width: 100%;
+  }
+  .prefs .prefrow:last-child { border-bottom: 0; }
+  /* A whole row that is itself a control (the switches and the sort choices). */
+  button.prefrow {
+    font: inherit; color: inherit; background: var(--card); border: 0;
+    border-bottom: 1px solid var(--line); text-align: left; cursor: pointer;
+  }
+  button.prefrow:active { background: var(--card2); }
+  .prefrow .pname {
+    flex: 1 1 130px; min-width: 0; font-size: 15px; font-weight: 620;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* Hidden means "not offered anywhere", not "deleted": the row stays, so it
+     can be brought back, and says which one it is by looking switched off. */
+  .prefrow.off .pname { color: var(--dim); }
+  .prefrow .pnote {
+    font-size: 12px; color: var(--dim); font-weight: 600; margin-left: 7px;
+    font-variant-numeric: tabular-nums;
+  }
+  .prefrow .pacts { display: flex; align-items: center; gap: 4px; flex: none; }
+  .prefrow .tick { flex: none; font-weight: 800; opacity: 0; color: var(--accent); }
+  .prefrow.on .tick { opacity: 1; }
+  .prefrow.on .pname { font-weight: 700; }
+  .minibtn {
+    min-width: 44px; height: 44px; padding: 0 9px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card2); color: var(--text);
+    font: inherit; font-size: 13px; font-weight: 650; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; flex: none;
+  }
+  .minibtn:active { opacity: .7; }
+  .minibtn[disabled] { opacity: .3; }
+  .minibtn.danger { color: var(--red); }
+  .minibtn.arrow { font-size: 17px; padding: 0; }
+  .stepval {
+    min-width: 34px; text-align: center; font-size: 16px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .prefhint { font-size: 12.5px; color: var(--dim); line-height: 1.5; margin: 8px 0 0; }
+
+  /* ---- reorder (design.md D8, prefs.sort.mode = manual) ----------------- */
+  /* The handle is the ONLY thing that starts a drag, and it is the only thing
+     on the row with touch-action:none -- so a finger anywhere else still
+     scrolls the list, which is what a finger does 99% of the time. Without
+     that one declaration a touch-drag on iOS scrolls the page instead of
+     moving the row, and the feature simply does not exist on the phone. */
+  .draghandle {
+    flex: none; width: 44px; height: 44px; margin-top: 5px; padding: 0;
+    border: 0; background: none; color: var(--dim); cursor: grab;
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none; font-size: 17px; line-height: 1;
+  }
+  .draghandle svg {
+    width: 20px; height: 20px; fill: none; stroke: currentColor;
+    stroke-width: 2; stroke-linecap: round;
+  }
+  .task.buttonrow { position: relative; }
+  .task.buttonrow .draghandle { position: absolute; top: 2px; right: 2px; margin: 0; }
+  .task.buttonrow.hashandle .taskbody { padding-right: 46px; }
+  .task.dragging {
+    position: relative; z-index: 6; background: var(--card);
+    box-shadow: var(--shadow); border-radius: 10px; cursor: grabbing;
+  }
+  .task.dragging .draghandle { color: var(--accent); }
+  /* .list clips its corners, which would also clip a row lifted out of it. */
+  body.dragging .list { overflow: visible; }
+  body.dragging { user-select: none; -webkit-user-select: none; }
+  #btnReorder.on { color: var(--accent); background: var(--card2); }
+
   /* ---- reduced motion --------------------------------------------------- */
   /* Everything above is decoration on a state the app is in anyway, so all of
      it can go. What must NOT go with it is the behaviour: the grace period is
@@ -600,6 +682,14 @@
     <button class="statusbtn" id="statusPill" aria-label="Sync status — tap to sync now" aria-live="polite">
       <span class="dot" id="dot"></span><span class="t" id="statusText">starting</span>
     </button>
+    <!-- Only on screen while Settings says the sort is Manual: a drag handle
+         is meaningless in an order the server decides from the due date. -->
+    <button class="iconbtn" id="btnReorder" hidden aria-pressed="false"
+            aria-label="Reorder tasks by dragging">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M9 6h10M9 12h10M9 18h10M4.5 5.2v2M4.5 11.2v2M4.5 17.2v2"/>
+      </svg>
+    </button>
     <button class="iconbtn" id="btnRefresh" aria-label="Refresh from the server">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 3.5v5h-5"/>
@@ -616,6 +706,10 @@
        written from JS too, because inside a filter it has to name the filter. -->
   <div class="filterbar" id="filterbar" role="group"
        aria-label="Filter by category or tag"></div>
+  <p class="hint" id="reorderHint" hidden>
+    Drag <b>&#8801;</b> to reorder. A task can only move inside its own group —
+    the group is decided by the due date, not by you.
+  </p>
   <div id="groups"></div>
   <div class="empty" id="tasksEmpty" hidden></div>
 </section>
@@ -650,6 +744,51 @@
     <button class="btn" id="setTest">Test connection</button>
   </div>
   <div class="banner" id="setTestOut" hidden></div>
+
+  <!-- Everything from here to "This device" is one document on the SERVER
+       (GET/PUT /api/prefs, docs/api.md). It is deliberately not part of the
+       offline queue: a preference that silently applied on this phone and
+       reached the server half an hour later would have the widget, the app and
+       any other phone disagreeing about what is on screen, with nothing saying
+       why. So an editor with no connection says so and changes nothing. -->
+  <div class="banner bad" id="prefsWarn" hidden></div>
+
+  <h2 class="group">Sort tasks by</h2>
+  <div class="prefs" id="sortEditor"></div>
+  <p class="prefhint">
+    The server puts the list in this order and both this app and the
+    home-screen widget show what it sends (design.md D8). <b>Manual</b> adds a
+    reorder handle to the Tasks screen.
+  </p>
+
+  <h2 class="group">Categories</h2>
+  <div class="prefs" id="catEditor"></div>
+  <p class="prefhint">
+    A category is Taskwarrior's project (design.md D13). <b>Hide</b> takes one
+    out of the pickers and the chip row without touching a single task — the
+    tasks in it stay in the list. Renaming and deleting move every task that
+    has it.
+  </p>
+
+  <h2 class="group">Filter chips</h2>
+  <div class="prefs" id="chipEditor"></div>
+  <p class="prefhint">
+    The row above the Tasks list, in this order. A chip with nothing pending in
+    it is left out anyway — an empty chip is noise (design.md D9).
+  </p>
+
+  <h2 class="group">Widget</h2>
+  <label>Groups it shows</label>
+  <div class="prefs" id="widgetGroups"></div>
+  <label>Rows per widget size</label>
+  <div class="prefs" id="widgetRows"></div>
+  <label for="widgetCat">Category</label>
+  <select id="widgetCat"></select>
+  <div class="prefs" id="widgetOpts" style="margin-top:12px"></div>
+  <p class="prefhint">
+    The widget picks this up on its next refresh (about 15 minutes) or when you
+    leave the app.
+  </p>
 
   <h2 class="group">This device</h2>
   <div class="kv">
@@ -761,6 +900,34 @@
       that time.
     </p>
 
+    <!-- Repeat (api.md, "Recurrence"). The period lives on the recurring
+         TEMPLATE, never on the instance in front of you, so saving one of
+         these can hand back a different task: a plain task given a period
+         becomes a template and the server answers with its first instance.
+         See sheetSave() and drain(). -->
+    <label for="shRecur">Repeat</label>
+    <select id="shRecur">
+      <option value="">Does not repeat</option>
+      <option value="daily">Daily</option>
+      <option value="weekdays">Weekdays</option>
+      <option value="weekly">Weekly</option>
+      <option value="biweekly">Every 2 weeks</option>
+      <option value="monthly">Monthly</option>
+      <option value="yearly">Yearly</option>
+      <option value="__custom__">Custom…</option>
+    </select>
+    <input type="text" id="shRecurCustom" hidden placeholder="e.g. 3d, 2w, quarterly"
+           autocapitalize="none" autocorrect="off" spellcheck="false"
+           aria-label="Custom repeat period" style="margin-top:8px">
+    <div id="shUntilRow" hidden>
+      <label for="shUntil">Until (optional)</label>
+      <div class="row2">
+        <input type="date" id="shUntil" aria-label="Repeat until this date">
+        <button class="btn small" id="shClearUntil">Clear</button>
+      </div>
+    </div>
+    <p class="hint" id="shRecurHint" hidden></p>
+
     <label>Tags</label>
     <div class="chips" id="shTags"></div>
     <div class="addrow">
@@ -793,7 +960,7 @@
   <div class="inner">
     <div class="grab"></div>
     <div class="sheethead">
-      <h3>Category</h3>
+      <h3 id="catTitle">Category</h3>
       <button class="iconbtn" id="catClose" aria-label="Close">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
@@ -851,6 +1018,17 @@ const SVG_CHECK = '<svg viewBox="0 0 24 24" aria-hidden="true">' +
 const CAT_RE = /^[A-Za-z0-9_.-]{1,40}$/;
 const CAT_RULE = 'A category can only use letters, numbers and . _ -';
 
+// A repeat period, checked here for the same reason: `task modify recur:junk`
+// is a 422 (or a Taskwarrior error) half a minute after the sheet closed.
+// Taskwarrior is the real authority on what a period means -- it accepts
+// `3d`, `2w`, `quarterly`, `daily` -- so this only insists on the shape they
+// all share, a run of digits and then letters.
+const RECUR_RE = /^[0-9]*[a-z]+$/;
+const RECUR_RULE = 'A repeat period is a word like daily, or a number and a ' +
+                   'unit like 3d or 2w.';
+// The six the picker offers by name. Anything else is "Custom…".
+const RECUR_OPTIONS = ['daily', 'weekdays', 'weekly', 'biweekly', 'monthly', 'yearly'];
+
 const LS = window.localStorage;
 const K = {
   base: 'tm.base',        // server URL
@@ -863,6 +1041,7 @@ const K = {
   meta: 'tm.meta',        // last GET /api/meta (projects + tags for the sheet)
   filter: 'tm.filter',    // the one selected chip: '', 'p:<project>' or 't:<tag>'
   qaCategory: 'tm.qaCategory', // the category quick-add gives a new task
+  prefs: 'tm.prefs',      // last GET /api/prefs (categories, chips, sort, widget)
   lastSync: 'tm.lastsync' // ISO of the last successful list
 };
 
@@ -922,6 +1101,92 @@ let filter = lsGet(K.filter, '');
 // and coming back to it silently filing tasks somewhere else would be worse
 // than any stale list.
 let qaCategory = lsGet(K.qaCategory, '');
+
+// ---------------------------------------------------------------------------
+// preferences (docs/api.md, "Preferences") -- ONE document, on the SERVER
+// ---------------------------------------------------------------------------
+// Category order and hiding, the chip row, the sort mode and the widget's
+// contents all live in one JSON document that `PUT /api/prefs` REPLACES. So
+// every editor here read-modify-writes the whole thing; sending only the part
+// it edited would silently reset the other three.
+//
+// It is NOT in the offline write queue, and that is deliberate. A queued
+// preference would apply on this phone now and reach the server minutes later,
+// leaving the widget (which reads its own copy from the server, design.md D7)
+// and this screen disagreeing with nothing on either of them saying why. An
+// editor with no connection says so and changes nothing -- see putPrefs().
+//
+// tm.prefs is a CACHE of the server's copy, so the pickers and the chip row
+// are right at launch before the network answers. The server's copy wins on
+// every load.
+const SORT_MODES = ['due', 'priority', 'urgency', 'manual'];
+const WIDGET_GROUPS = ['overdue', 'today', 'upcoming', 'none'];
+// Bounds on the widget's rows, per family: what the widget can actually DRAW
+// at that size, not what the feed could carry. Same numbers as the server's.
+const ROW_BOUNDS = { small: [1, 3], medium: [1, 5], large: [1, 12] };
+const DEFAULT_PREFS = {
+  categories: { order: ['personal', 'work', 'claude', 'fun', 'inbox'], hidden: [] },
+  chips: { order: ['p:personal', 'p:work', 'p:claude', 'p:fun', 'p:inbox',
+                   't:claude', 't:alert'], hidden: [] },
+  sort: { mode: 'due' },
+  widget: { groups: ['overdue', 'today'], upcoming_days: 7, category: null,
+            rows: { small: 3, medium: 5, large: 12 }, show_category: false }
+};
+
+function strList(v) { return Array.isArray(v) ? v.filter(x => typeof x === 'string') : []; }
+function clampInt(v, lo, hi, dflt) {
+  const n = typeof v === 'number' && isFinite(v) ? Math.round(v) : NaN;
+  if (isNaN(n)) return dflt;
+  return Math.min(hi, Math.max(lo, n));
+}
+// Anything the server (or a stale cache, or a hand-edited localStorage) can
+// hand over is folded into a complete document here, so every reader below can
+// assume the shape without a defensive check of its own.
+function normPrefs(v) {
+  const d = v && typeof v === 'object' ? v : {};
+  const cat = d.categories || {}, ch = d.chips || {}, so = d.sort || {}, w = d.widget || {};
+  const rows = w.rows || {};
+  const mode = SORT_MODES.indexOf(so.mode) >= 0 ? so.mode : 'due';
+  return {
+    categories: {
+      order: strList(cat.order).length ? strList(cat.order)
+                                       : DEFAULT_PREFS.categories.order.slice(),
+      hidden: strList(cat.hidden)
+    },
+    chips: {
+      order: strList(ch.order).length ? strList(ch.order)
+                                      : DEFAULT_PREFS.chips.order.slice(),
+      hidden: strList(ch.hidden)
+    },
+    sort: { mode: mode },
+    widget: {
+      groups: WIDGET_GROUPS.filter(g => strList(w.groups).indexOf(g) >= 0),
+      upcoming_days: clampInt(w.upcoming_days, 1, 60, 7),
+      category: typeof w.category === 'string' && w.category ? w.category : null,
+      rows: {
+        small: clampInt(rows.small, ROW_BOUNDS.small[0], ROW_BOUNDS.small[1], 3),
+        medium: clampInt(rows.medium, ROW_BOUNDS.medium[0], ROW_BOUNDS.medium[1], 5),
+        large: clampInt(rows.large, ROW_BOUNDS.large[0], ROW_BOUNDS.large[1], 12)
+      },
+      show_category: !!w.show_category
+    }
+  };
+}
+let prefs = normPrefs(lsJSON(K.prefs, null));
+// One PUT at a time. Two editors read-modify-writing the same document at once
+// would each send their own copy of it and the slower one would undo the
+// faster, so a second tap while one is in flight is dropped rather than raced.
+let prefsSaving = false;
+
+function sortMode() { return prefs.sort.mode; }
+function isHiddenCat(name) { return prefs.categories.hidden.indexOf(name) >= 0; }
+function isHiddenChip(v) {
+  if (prefs.chips.hidden.indexOf(v) >= 0) return true;
+  // A category hidden as a CATEGORY is hidden everywhere, chip row included:
+  // one "hide" that left the chip standing would be a filter for something the
+  // pickers say does not exist.
+  return v.indexOf('p:') === 0 && isHiddenCat(v.slice(2));
+}
 
 let netState = '';        // '', 'offline', 'forbidden', 'unauthorized', 'error'
 let netDetail = '';
@@ -1079,6 +1344,87 @@ function byOrderKey(a, b) {
   return ka < kb ? -1 : ka > kb ? 1 : 0;
 }
 
+// ---------------------------------------------------------------------------
+// server order (docs/api.md, "Ordering moves to the server")
+// ---------------------------------------------------------------------------
+// The SERVER now decides the order and says which group each task is in, and
+// the list is rendered in the order it arrived. Everything above is still here
+// because two cases have no server answer to render:
+//
+//   * an OPTIMISTIC row -- one this phone has added or edited and not yet sent
+//     (design.md D6). The server has never seen it, so it has no `group` and no
+//     place in the received order, and it is put where the local rule says it
+//     goes rather than dumped at the end of its group;
+//   * a CACHED list from a server that never sent an order at all -- an older
+//     build, or a list stored before this one shipped. Every row is then
+//     "local" and the whole screen falls back to the rule it has always used.
+//
+// A row is the server's while it still carries the group and the position the
+// server gave it AND nothing unsent has touched it.
+const GROUP_KEYS = ['overdue', 'today', 'upcoming', 'none'];
+function isServerRow(t) {
+  return !t._dirty && typeof t._pos === 'number' &&
+         GROUP_KEYS.indexOf(t.group) >= 0;
+}
+function groupFor(t) { return isServerRow(t) ? t.group : groupOf(t); }
+
+// The local rule, per sort mode -- the same rules the server applies, so a row
+// placed here lands where the next list from the server will keep it.
+function cmpLocal(groupKey) {
+  const mode = sortMode();
+  return function (a, b) {
+    if (mode === 'manual') {
+      // `order` first, ascending, and only in manual: it is the one mode where
+      // a number the user dragged into place outranks the due date.
+      const oa = typeof a.order === 'number' ? a.order : null;
+      const ob = typeof b.order === 'number' ? b.order : null;
+      if (oa !== null && ob !== null && oa !== ob) return oa - ob;
+      if (oa !== null && ob === null) return -1;
+      if (oa === null && ob !== null) return 1;
+      return byOrderKey(a, b);
+    }
+    if (mode === 'priority') {
+      const pa = PRIO_RANK[a.priority] || '3', pb = PRIO_RANK[b.priority] || '3';
+      if (pa !== pb) return pa < pb ? -1 : 1;
+      return byOrderKey(a, b);
+    }
+    if (mode === 'urgency') {
+      const d = (b.urgency || 0) - (a.urgency || 0);
+      if (d) return d;
+      return a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0;
+    }
+    // "due": the canonical key, except in the no-date group where there is no
+    // date to lead with and urgency leads instead (api.md, "Canonical order").
+    if (groupKey === 'none') {
+      const d = (b.urgency || 0) - (a.urgency || 0);
+      if (d) return d;
+    }
+    return byOrderKey(a, b);
+  };
+}
+
+// One group's rows, in the order to paint them: the server's rows in the
+// server's order, with the local ones SPLICED IN by the local key rather than
+// appended. Appending would drop a task you have just edited to the bottom of
+// its group for the second or two before the next list arrives, which looks
+// exactly like the app having moved it somewhere you did not ask for.
+function orderGroup(rows, groupKey) {
+  const cmp = cmpLocal(groupKey);
+  const srv = [], loc = [];
+  for (const t of rows) (isServerRow(t) ? srv : loc).push(t);
+  if (!srv.length) return loc.sort(cmp);
+  srv.sort((a, b) => a._pos - b._pos);
+  if (!loc.length) return srv;
+  loc.sort(cmp);
+  const out = srv.slice();
+  for (const t of loc) {
+    let i = 0;
+    while (i < out.length && cmp(out[i], t) <= 0) i++;
+    out.splice(i, 0, t);
+  }
+  return out;
+}
+
 // ===========================================================================
 // the filter (design.md D9)
 // ===========================================================================
@@ -1087,6 +1433,36 @@ function byOrderKey(a, b) {
 // filter narrows the SAME grouped list; it never changes the grouping, the
 // order, or what a row does.
 const FILTER_TAGS = ['claude', 'alert'];   // the two tags that mean something downstream
+// `button` says how a row BEHAVES -- it is a confirm-first action row, not a
+// slice of the list worth filtering to (design.md D9) -- so it is never offered
+// as a chip and never appears in the Filters editor either.
+const NEVER_CHIP = ['t:button'];
+
+// How many pending tasks each possible chip would show.
+function chipCounts(all) {
+  const counts = {};
+  for (const t of all) {
+    if (t.project) counts['p:' + t.project] = (counts['p:' + t.project] || 0) + 1;
+    for (const g of (t.tags || [])) counts['t:' + g] = (counts['t:' + g] || 0) + 1;
+  }
+  return counts;
+}
+// prefs.chips.order, then anything in use that it has not heard of. A tag has
+// to be offered deliberately -- claude and alert always are, because they mean
+// something downstream, and any other only once it is in the order list, which
+// is what the Filters editor writes. Otherwise every tag anyone has ever put on
+// a task would turn up as a chip, which is the row of noise D9 refused.
+function chipOrder(counts) {
+  const out = prefs.chips.order.filter(v => NEVER_CHIP.indexOf(v) === -1);
+  const extra = [];
+  for (const v of Object.keys(counts || {})) {
+    if (out.indexOf(v) >= 0 || NEVER_CHIP.indexOf(v) >= 0) continue;
+    if (v.indexOf('t:') === 0 && FILTER_TAGS.indexOf(v.slice(2)) === -1) continue;
+    extra.push(v);
+  }
+  extra.sort();
+  return out.concat(extra);
+}
 
 function filterProject() { return filter.indexOf('p:') === 0 ? filter.slice(2) : ''; }
 function filterTag() { return filter.indexOf('t:') === 0 ? filter.slice(2) : ''; }
@@ -1126,7 +1502,12 @@ function findIn(list, uuid) {
 // is usually empty. What it buys is that an optimistic write is one array push
 // away from being on screen, and a refresh cannot lose one.
 function project() {
-  const pend = srvTasks.map(t => Object.assign({}, t));
+  // _pos is the position the SERVER put this row in (api.md, "Ordering moves
+  // to the server"); _dirty marks a row an unsent op has touched. Between them
+  // they decide, per row, whether the screen renders the server's order or
+  // falls back to the local rule. Both live on the projection's copies only --
+  // nothing here is ever persisted or sent.
+  const pend = srvTasks.map((t, i) => Object.assign({}, t, { _pos: i }));
   const dn = srvDone.map(t => Object.assign({}, t));
   const pendingIds = {};   // uuids with an unsent op, for the little amber dot
 
@@ -1139,7 +1520,10 @@ function project() {
   }
   function patchInPlace(uuid, fields) {
     let i = findIn(pend, uuid);
-    if (i >= 0) { pend[i] = Object.assign({}, pend[i], fields); return pend[i]; }
+    if (i >= 0) {
+      pend[i] = Object.assign({}, pend[i], fields, { _dirty: true });
+      return pend[i];
+    }
     i = findIn(dn, uuid);
     if (i >= 0) { dn[i] = Object.assign({}, dn[i], fields); return dn[i]; }
     return null;
@@ -1301,6 +1685,18 @@ async function drain() {
       } else if (op.kind === 'delete') {
         forgetTask(op.uuid);
       } else if (res.data && res.data.uuid) {
+        // A PATCH normally answers with the task it was sent to. `recur` on a
+        // plain task is the exception: it turns the task into a recurring
+        // TEMPLATE and the answer is the first INSTANCE, which has its own
+        // uuid (api.md, "Recurrence"). Replace the row rather than keeping
+        // both -- the old uuid is a template now and templates are not on the
+        // list -- and carry any op still queued behind this one over to the
+        // instance, exactly as an add's temp id is carried over.
+        if (op.kind === 'patch' && res.data.uuid !== op.uuid) {
+          forgetTask(op.uuid);
+          rewriteId(op.uuid, res.data.uuid);
+          toast('Now repeating — this is the first occurrence.');
+        }
         mergeServerTask(res.data);
       }
       queue.shift(); persistQueue();
@@ -1413,6 +1809,11 @@ async function refresh(quiet) {
         }
       } catch (e) { /* the pending list is the one that matters */ }
     }
+    // The order the list above arrived in was decided by prefs.sort.mode, and
+    // the chip row and the pickers are drawn from the same document, so it is
+    // read on the same beat rather than on one of its own. An explicit refresh
+    // forces it; see loadPrefs().
+    await loadPrefs(!quiet);
     render();
   } catch (err) {
     if (err.status === 0) setNet('offline', err.detail);
@@ -1441,6 +1842,87 @@ async function loadMeta() {
   } catch (e) { /* the sheet falls back to the cached/default project list */ }
 }
 
+// ---------------------------------------------------------------------------
+// preferences over the wire
+// ---------------------------------------------------------------------------
+// Read on every refresh that could be looking at them and on every explicit
+// one, not on all of them: the 30 s poll's whole economy is one conditional
+// GET that usually answers 304 (design.md D6), and a second unconditional
+// request every half minute for a document that changes when the user changes
+// it would double that for nothing. What the poll would catch is another
+// device's edit, and the next time this one opens Settings or asks for a
+// refresh it has it.
+let prefsEverLoaded = false;
+async function loadPrefs(force) {
+  if (!store.base) return;
+  if (!force && prefsEverLoaded && current !== 'settings') return;
+  try {
+    const r = await req('/api/prefs');
+    if (r.data && typeof r.data === 'object') {
+      prefs = normPrefs(r.data);
+      lsSet(K.prefs, JSON.stringify(prefs));
+      prefsEverLoaded = true;
+    }
+  } catch (e) {
+    // The cached copy stands. A server too old to have /api/prefs answers 404
+    // here and the app keeps working off the defaults, which are what it did
+    // before any of this existed.
+  }
+}
+
+// Every editor goes through this. `mutate` is handed the WHOLE document to
+// change in place, because PUT replaces it -- sending just the edited branch
+// would reset the other three to their defaults.
+async function putPrefs(mutate, okMsg) {
+  if (!store.base) { toast(NEEDS_CONN, { bad: true }); return false; }
+  if (prefsSaving) return false;
+  const next = normPrefs(JSON.parse(JSON.stringify(prefs)));
+  mutate(next);
+  prefsSaving = true;
+  render();
+  try {
+    const r = await req('/api/prefs', { method: 'PUT', body: next });
+    // Adopt what the server KEPT, not what was sent: it validates and
+    // normalises, and a screen showing the other one is a lie the next refresh
+    // would silently correct.
+    prefs = normPrefs(r.data && typeof r.data === 'object' ? r.data : next);
+    lsSet(K.prefs, JSON.stringify(prefs));
+    prefsEverLoaded = true;
+    if (okMsg) toast(okMsg);
+    return true;
+  } catch (err) {
+    toast(err.status === 0 ? NEEDS_CONN : ('Could not save: ' + err.detail),
+          { bad: true });
+    return false;
+  } finally {
+    prefsSaving = false;
+    render();
+  }
+}
+const NEEDS_CONN = 'That needs a connection to the server — preferences are ' +
+                   'not queued.';
+
+// The two category operations that are not preferences: they rewrite tasks, so
+// they are ordinary server calls and not part of the prefs document.
+async function categoryCall(path, body, okMsg) {
+  if (!store.base) { toast(NEEDS_CONN, { bad: true }); return false; }
+  try {
+    await req(path, { method: 'POST', body: body });
+  } catch (err) {
+    toast(err.status === 0 ? NEEDS_CONN : ('Could not save: ' + err.detail),
+          { bad: true });
+    return false;
+  }
+  // Every category on screen has just moved, so the list, the meta and the
+  // prefs are all stale at once.
+  etag = ''; lsDel(K.etag);
+  await loadMeta();
+  await loadPrefs(true);
+  await refresh(true);
+  if (okMsg) toast(okMsg);
+  return true;
+}
+
 // ===========================================================================
 // toast
 // ===========================================================================
@@ -1466,6 +1948,24 @@ $('toastText').onclick = function () { $('toast').hidden = true; };
 // ===========================================================================
 // rendering
 // ===========================================================================
+// The six periods the sheet offers by name, said the way a row says them. A
+// custom period ("3d", "quarterly") is shown verbatim -- it is what was typed
+// and what Taskwarrior was given.
+const RECUR_LABELS = {
+  daily: 'daily', weekdays: 'weekdays', weekly: 'weekly',
+  biweekly: 'every 2 weeks', monthly: 'monthly', yearly: 'yearly'
+};
+function recurLabel(v) { return RECUR_LABELS[v] || String(v || ''); }
+
+// The one thing on a row that starts a drag (see startDrag). Only painted in
+// reorder mode, and only on the Tasks screen.
+function dragHandle(t) {
+  return '<button class="draghandle" data-act="drag" aria-label="Reorder ' +
+    esc(t.description) + '">' +
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path d="M4 7h16M4 12h16M4 17h16"/></svg></button>';
+}
+
 function priorityBadge(p) {
   if (!p) return '';
   return '<span class="badge ' + esc(p) + '">' + esc(p) + '</span>';
@@ -1484,9 +1984,21 @@ function metaLine(t, opts) {
   // it was late is noise, and next to the completion time two clock values on
   // one row read as a contradiction.
   if (t.due && !opts.hideDue) {
-    const g = groupOf(t);
+    // The same group the row was filed under, so a due painted red is always a
+    // row under the Overdue heading and never the two disagreeing.
+    const g = groupFor(t);
     const cls = g === 'overdue' ? ' od' : (g === 'today' ? ' now' : '');
     bits.push('<span class="due' + cls + '">' + esc(dueLabel(t.due)) + '</span>');
+  }
+  // Repeating: the arrow AND the period, because "↻" alone answers "does this
+  // come back?" and leaves "how often?" to a tap on the row. It stays on the
+  // Done tab, where the due is hidden: "this one was one of a series" is still
+  // true of a finished task, and it is the only thing on that row saying the
+  // next one is already waiting on the Tasks tab.
+  if (t.recur) {
+    bits.push('<span class="recur">↻ ' + esc(recurLabel(t.recur)) + '</span>');
+  } else if (t.parent) {
+    bits.push('<span class="recur">↻</span>');
   }
   if (opts.endLabel) bits.push('<span>' + esc(opts.endLabel) + '</span>');
   const tail = [];
@@ -1526,12 +2038,18 @@ function isButtonRow(t) {
 // the sheet exactly as it does everywhere else, so editing and deleting are
 // unchanged.
 function buttonRow(t, opts) {
+  // It gets a handle in reorder mode like any other row -- a row that could not
+  // be moved would be a hole in the order the user is arranging -- but tucked
+  // into the corner, because this row's shape is a pill and not a flex line.
+  const handle = opts.reorder ? dragHandle(t) : '';
   return '' +
-    '<div class="task buttonrow" data-uuid="' + esc(t.uuid) + '">' +
+    '<div class="task buttonrow' + (handle ? ' hashandle' : '') +
+      '" data-uuid="' + esc(t.uuid) + '">' +
       '<button class="taskbody" data-act="open">' +
         '<div class="desc">' + esc(t.description) + '</div>' +
         metaLine(t, opts) +
       '</button>' +
+      handle +
       '<button class="buttonpill" data-act="button">Tap to confirm</button>' +
     '</div>';
 }
@@ -1540,9 +2058,10 @@ function taskRow(t, opts) {
   opts = opts || {};
   if (isButtonRow(t)) return buttonRow(t, opts);
   const done = t.status === 'completed';
-  // The ↻ says "this is one instance of a repeating task": completing it is
-  // normal, and Taskwarrior spawns the next one server-side (api.md).
-  const rec = t.parent ? '<span class="recur" aria-label="repeating">↻ </span>' : '';
+  // The ↻ and the period are on the meta line now (see metaLine): the arrow in
+  // front of the description said a task repeats but never how often, which is
+  // the question the Repeat picker in the sheet exists to answer.
+  //
   // "Reopen", not "Un-complete": it is what the row does, it is what the toast
   // after it says, and arm() only has to swap the verb for the cancel label.
   return '' +
@@ -1555,9 +2074,10 @@ function taskRow(t, opts) {
         '<i>' + SVG_CHECK + '</i>' +
       '</button>' +
       '<button class="taskbody" data-act="open">' +
-        '<div class="desc">' + rec + esc(t.description) + '</div>' +
+        '<div class="desc">' + esc(t.description) + '</div>' +
         metaLine(t, opts) +
       '</button>' +
+      (opts.reorder ? dragHandle(t) : '') +
     '</div>';
 }
 
@@ -1566,28 +2086,19 @@ function taskRow(t, opts) {
 let filterBarPainted = null;   // the filter the bar was last scrolled for
 let filterBarHTML = '';        // what is already in the DOM; see below
 function renderFilterBar(all) {
-  const counts = {};
-  const seen = [];
-  for (const t of all) {
-    if (t.project) {
-      if (seen.indexOf(t.project) === -1) seen.push(t.project);
-      counts['p:' + t.project] = (counts['p:' + t.project] || 0) + 1;
-    }
-    for (const g of (t.tags || [])) counts['t:' + g] = (counts['t:' + g] || 0) + 1;
-  }
-  // pa's five first and in pa's order (api.md /api/meta), then any other
-  // project this list actually uses, alphabetically. A project with no pending
-  // task gets no chip at all: an empty chip is noise, and a row of them is the
-  // filter confusion this app replaced.
-  const projects = [];
-  for (const p of (meta.projects || [])) {
-    if (seen.indexOf(p) >= 0 && projects.indexOf(p) === -1) projects.push(p);
-  }
-  for (const p of seen.slice().sort()) if (projects.indexOf(p) === -1) projects.push(p);
-
+  const counts = chipCounts(all);
+  // The ORDER and the hiding are the user's, from Settings → Filter chips
+  // (prefs.chips). What has never been decided by anyone -- a category that
+  // turned up on a task today -- comes after the list, alphabetically.
+  //
+  // A chip with nothing pending in it is still left out entirely, prefs or no
+  // prefs: an empty chip is noise, and a row of them is the filter confusion
+  // this app replaced (design.md D9).
   const chips = [['', 'All', all.length, false]];
-  for (const p of projects) chips.push(['p:' + p, p, counts['p:' + p], false]);
-  for (const g of FILTER_TAGS) if (counts['t:' + g]) chips.push(['t:' + g, g, counts['t:' + g], true]);
+  for (const v of chipOrder(counts)) {
+    if (isHiddenChip(v) || !counts[v]) continue;
+    chips.push([v, v.slice(2), counts[v], v.indexOf('t:') === 0]);
+  }
   // The selected chip keeps its place even when its last task has just left,
   // showing 0. Dropping it would leave "Nothing in work" on screen with
   // nothing anywhere saying why and no chip to tap to undo it.
@@ -1633,27 +2144,25 @@ function renderFilterBar(all) {
 function renderTasks(view, vis) {
   renderFilterBar(view.pend);
 
+  // The group each task is in is the SERVER's answer where there is one, and
+  // groupOf()'s where there is not; the order inside it is the order the
+  // server sent, with unsent rows spliced in. See orderGroup().
   const groups = { overdue: [], today: [], upcoming: [], none: [] };
-  for (const t of vis) groups[groupOf(t)].push(t);
-  // The canonical order, and nothing else decides it. See orderKey().
-  groups.overdue.sort(byOrderKey);
-  groups.today.sort(byOrderKey);
-  groups.upcoming.sort(byOrderKey);
-  // No date has no date to lead with, so urgency leads and the key breaks the
-  // ties -- which is what stops two equally urgent undated tasks trading
-  // places between renders (api.md "Canonical order", 3).
-  groups.none.sort((a, b) => ((b.urgency || 0) - (a.urgency || 0)) || byOrderKey(a, b));
+  for (const t of vis) groups[groupFor(t)].push(t);
 
   const order = [['overdue', 'Overdue', 'od'], ['today', 'Today', ''],
                  ['upcoming', 'Upcoming', ''], ['none', 'No date', '']];
   const html = [];
   for (const [key, label, cls] of order) {
-    const rows = groups[key];
+    const rows = orderGroup(groups[key], key);
     if (!rows.length) continue;      // an empty group is not a heading
     html.push('<h2 class="group ' + cls + '">' + label +
               '<span class="n">' + rows.length + '</span></h2>');
-    html.push('<div class="list">' +
-      rows.map(t => taskRow(t, { waiting: !!view.pendingIds[t.uuid] })).join('') +
+    // data-group is what a drop reads back: a drag may only reorder inside one
+    // of these lists, because the group is the due date's business.
+    html.push('<div class="list" data-group="' + key + '">' +
+      rows.map(t => taskRow(t, { waiting: !!view.pendingIds[t.uuid],
+                                 reorder: reorderMode })).join('') +
       '</div>');
   }
   $('groups').innerHTML = html.join('');
@@ -1743,6 +2252,8 @@ function render() {
     paintStatus();      // the pill is outside the list and safe to update
     return;
   }
+  // Before renderTasks: it decides whether the rows are painted with handles.
+  paintReorder();
   const view = project();
   // The filtered list, once: the list, the empty state and the header count
   // all have to agree, and a header that counts tasks the screen is not
@@ -1768,6 +2279,307 @@ function renderSettings(view) {
                                 view.done.length + ' done');
   $('setQueue').textContent = String(queue.length);
   $('setRetry').disabled = !queue.length;
+
+  // The four preference editors. They all read `prefs` and all write it back
+  // whole through putPrefs(); none of them keeps state of its own, so a PUT
+  // that the server changed on the way through repaints as what was stored.
+  const warn = $('prefsWarn');
+  if (!store.base) {
+    warn.innerHTML = '<b>Not connected.</b> These are stored on the server, ' +
+      'and they are not queued — set the server URL above to change them.';
+    warn.hidden = false;
+  } else if (netState === 'offline') {
+    warn.innerHTML = '<b>Cannot reach the server.</b> These are what it last ' +
+      'said; changing one needs a connection.';
+    warn.hidden = false;
+  } else {
+    warn.hidden = true;
+  }
+  renderSortEditor();
+  renderCatEditor();
+  renderChipEditor();
+  renderWidgetEditor();
+}
+
+// Written only when it actually differs, for the same reason the filter bar is
+// (render() runs on the 30 s poll): rewriting innerHTML under someone's thumb
+// drops focus, resets the scroll and re-lays-out a list they are reading.
+function setHTML(id, html) {
+  const el = $(id);
+  if (el.__html !== html) { el.__html = html; el.innerHTML = html; }
+}
+function miniBtn(label, act, key, aria, opts) {
+  opts = opts || {};
+  return '<button class="minibtn' + (opts.cls ? ' ' + opts.cls : '') + '"' +
+    ' data-act="' + esc(act) + '" data-key="' + esc(key) + '"' +
+    (opts.disabled ? ' disabled' : '') +
+    ' aria-label="' + esc(aria) + '">' + label + '</button>';
+}
+// ↑ / ↓ for a row at `i` of `n`. Disabled at the ends rather than absent, so
+// the buttons under one row line up with the buttons under the next.
+function moveBtns(key, i, n, what) {
+  return miniBtn('&#8593;', 'up', key, 'Move ' + what + ' up',
+                 { cls: 'arrow', disabled: i === 0 }) +
+         miniBtn('&#8595;', 'down', key, 'Move ' + what + ' down',
+                 { cls: 'arrow', disabled: i === n - 1 });
+}
+// A row that is itself a switch: the whole 52px line toggles, and the tick on
+// the right is the state. Same shape as the category picker's rows, because it
+// is the same gesture.
+function switchRow(on, label, attr, note) {
+  return '<button class="prefrow' + (on ? ' on' : ' off') + '" ' + attr +
+    ' aria-pressed="' + (on ? 'true' : 'false') + '">' +
+    '<span class="pname">' + esc(label) +
+      (note ? '<span class="pnote">' + esc(note) + '</span>' : '') + '</span>' +
+    '<span class="tick" aria-hidden="true">&#10003;</span></button>';
+}
+function stepperRow(label, key, value, lo, hi, note) {
+  return '<div class="prefrow"><span class="pname">' + esc(label) +
+    (note ? '<span class="pnote">' + esc(note) + '</span>' : '') + '</span>' +
+    '<span class="pacts">' +
+      miniBtn('&#8722;', 'dec', key, 'One fewer for ' + label,
+              { cls: 'arrow', disabled: value <= lo }) +
+      '<span class="stepval" aria-live="polite">' + esc(value) + '</span>' +
+      miniBtn('+', 'inc', key, 'One more for ' + label,
+              { cls: 'arrow', disabled: value >= hi }) +
+    '</span></div>';
+}
+
+// ---- Settings → Sort tasks by ---------------------------------------------
+const SORT_LABELS = [['due', 'Due date'], ['priority', 'Priority first'],
+                     ['urgency', 'Urgency'], ['manual', 'Manual']];
+function renderSortEditor() {
+  const m = sortMode();
+  setHTML('sortEditor', SORT_LABELS.map(
+    r => switchRow(r[0] === m, r[1], 'data-sort="' + esc(r[0]) + '"',
+                   r[0] === 'manual' ? 'drag to arrange' : '')).join(''));
+}
+
+// ---- Settings → Categories -------------------------------------------------
+function catCount(name) {
+  const c = (meta.categories || []).filter(x => x && x.name === name)[0];
+  if (c && typeof c.count === 'number') return c.count;
+  return project().pend.filter(t => t.project === name).length;
+}
+function renderCatEditor() {
+  const names = allCategories();
+  if (!names.length) {
+    setHTML('catEditor', '<div class="prefrow"><span class="pname">' +
+      'No categories yet.</span></div>');
+    return;
+  }
+  setHTML('catEditor', names.map((name, i) => {
+    const hidden = isHiddenCat(name);
+    const n = catCount(name);
+    const note = n + (n === 1 ? ' task' : ' tasks') + (hidden ? ' · hidden' : '');
+    return '<div class="prefrow' + (hidden ? ' off' : '') + '">' +
+      '<span class="pname">' + esc(name) +
+        '<span class="pnote">' + esc(note) + '</span></span>' +
+      '<span class="pacts">' +
+        moveBtns(name, i, names.length, 'the ' + name + ' category') +
+        miniBtn(hidden ? 'Show' : 'Hide', 'hide', name,
+                (hidden ? 'Show ' : 'Hide ') + name) +
+        miniBtn('Rename', 'rename', name, 'Rename ' + name) +
+        miniBtn('Delete', 'delete', name, 'Delete ' + name, { cls: 'danger' }) +
+      '</span></div>';
+  }).join(''));
+}
+
+// The order list on the server may never have heard of a category a task
+// invented this morning, so a move writes the WHOLE list back -- the one on
+// screen, which is the one the user just rearranged.
+function moveInList(list, key, dir) {
+  const i = list.indexOf(key);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) return list;
+  const out = list.slice();
+  out[i] = out[j]; out[j] = key;
+  return out;
+}
+function catEditorAct(act, name) {
+  if (act === 'up' || act === 'down') {
+    const next = moveInList(allCategories(), name, act === 'up' ? -1 : 1);
+    putPrefs(p => { p.categories.order = next; });
+    return;
+  }
+  if (act === 'hide') {
+    const hidden = isHiddenCat(name);
+    putPrefs(p => {
+      p.categories.hidden = hidden
+        ? p.categories.hidden.filter(x => x !== name)
+        : p.categories.hidden.concat([name]);
+      // Keep the order list complete while we are writing it anyway, so the
+      // next move has something to move within.
+      if (p.categories.order.indexOf(name) === -1) {
+        p.categories.order = allCategories();
+      }
+    }, hidden ? ('Showing ' + name) : (name + ' hidden'));
+    return;
+  }
+  if (act === 'rename') { renameCategory(name); return; }
+  if (act === 'delete') { deleteCategory(name); return; }
+}
+
+function renameCategory(name) {
+  const raw = window.prompt('Rename the "' + name + '" category to', name);
+  if (raw === null) return;                        // cancelled, not empty
+  const to = String(raw).trim().toLowerCase();
+  if (!CAT_RE.test(to)) { toast(CAT_RULE, { bad: true }); return; }
+  if (to === name) return;
+  const n = catCount(name);
+  if (!window.confirm('Rename "' + name + '" to "' + to + '"?\n\n' + n +
+                      ' task' + (n === 1 ? '' : 's') + ' will move with it.')) return;
+  categoryCall('/api/categories/rename', { from: name, to: to },
+               'Renamed to ' + to).then(ok => {
+    if (!ok) return;
+    // Anything on this phone still pointing at the old name would be pointing
+    // at a category that no longer exists: an empty filter with no way back to
+    // the tasks, and a quick-add chip filing new tasks under a name nothing
+    // else uses.
+    if (qaCategory === name) setQaCategory(to);
+    if (filter === 'p:' + name) setFilter('p:' + to);
+    render();
+  });
+}
+
+function deleteCategory(name) {
+  const n = catCount(name);
+  const others = categoryList().filter(c => c !== name);
+  openPick({
+    title: 'Move its tasks to',
+    hint: 'Deleting "' + name + '". Its ' + n + ' task' + (n === 1 ? '' : 's') +
+          ' stay — pick where they go.',
+    current: '__none__',
+    rows: [['', 'No category']].concat(others.map(c => [c, c])),
+    onPick: v => {
+      closeCatPicker();
+      const where = v ? ('moved to "' + v + '"') : 'left with no category';
+      if (!window.confirm('Delete the "' + name + '" category?\n\n' + n +
+                          ' task' + (n === 1 ? '' : 's') + ' will be ' + where +
+                          '.')) return;
+      categoryCall('/api/categories/delete', { name: name, move_to: v || null },
+                   'Deleted ' + name).then(ok => {
+        if (!ok) return;
+        if (qaCategory === name) setQaCategory(v || '');
+        if (filter === 'p:' + name) setFilter(v ? 'p:' + v : '');
+        render();
+      });
+    }
+  });
+}
+
+// ---- Settings → Filter chips ----------------------------------------------
+// Every chip that COULD be shown, whether or not it has anything in it today:
+// this is where a chip is turned on for the future, and a list that only
+// offered what is currently non-empty could not do that.
+function chipUniverse() {
+  const out = [];
+  const push = v => { if (NEVER_CHIP.indexOf(v) === -1 && out.indexOf(v) === -1) out.push(v); };
+  for (const v of prefs.chips.order) push(v);
+  for (const c of allCategories()) push('p:' + c);
+  for (const g of FILTER_TAGS) push('t:' + g);
+  for (const g of (meta.tags || [])) push('t:' + g);
+  return out;
+}
+function chipLabel(v) {
+  return v.indexOf('t:') === 0 ? '#' + v.slice(2) : v.slice(2);
+}
+function renderChipEditor() {
+  const list = chipUniverse();
+  const counts = chipCounts(project().pend);
+  setHTML('chipEditor', list.map((v, i) => {
+    const off = isHiddenChip(v);
+    const n = counts[v] || 0;
+    const notes = [n ? (n + ' pending') : 'nothing pending'];
+    if (v.indexOf('p:') === 0 && isHiddenCat(v.slice(2))) notes.push('category hidden');
+    else if (prefs.chips.hidden.indexOf(v) >= 0) notes.push('hidden');
+    return '<div class="prefrow' + (off ? ' off' : '') + '">' +
+      '<span class="pname">' + esc(chipLabel(v)) +
+        '<span class="pnote">' + esc(notes.join(' · ')) + '</span></span>' +
+      '<span class="pacts">' +
+        moveBtns(v, i, list.length, 'the ' + chipLabel(v) + ' chip') +
+        miniBtn(off ? 'Show' : 'Hide', 'hide', v,
+                (off ? 'Show ' : 'Hide ') + chipLabel(v) + ' chip') +
+      '</span></div>';
+  }).join(''));
+}
+function chipEditorAct(act, v) {
+  if (act === 'up' || act === 'down') {
+    const next = moveInList(chipUniverse(), v, act === 'up' ? -1 : 1);
+    putPrefs(p => { p.chips.order = next; });
+    return;
+  }
+  if (act === 'hide') {
+    // A category hidden as a CATEGORY is what is hiding this chip; unhiding it
+    // here would leave the row saying one thing and the chip row doing
+    // another, so say where the switch actually is.
+    if (v.indexOf('p:') === 0 && isHiddenCat(v.slice(2)) &&
+        prefs.chips.hidden.indexOf(v) === -1) {
+      toast('That category is hidden — show it under Categories.', { bad: true });
+      return;
+    }
+    const off = prefs.chips.hidden.indexOf(v) >= 0;
+    putPrefs(p => {
+      p.chips.hidden = off ? p.chips.hidden.filter(x => x !== v)
+                           : p.chips.hidden.concat([v]);
+      if (p.chips.order.indexOf(v) === -1) p.chips.order = chipUniverse();
+    });
+  }
+}
+
+// ---- Settings → Widget -----------------------------------------------------
+const WIDGET_GROUP_LABELS = { overdue: 'Overdue', today: 'Today',
+                              upcoming: 'Upcoming', none: 'No date' };
+function renderWidgetEditor() {
+  const w = prefs.widget;
+  const rows = WIDGET_GROUPS.map(g =>
+    switchRow(w.groups.indexOf(g) >= 0, WIDGET_GROUP_LABELS[g],
+              'data-g="' + g + '"', ''));
+  if (w.groups.indexOf('upcoming') >= 0) {
+    rows.push(stepperRow('Upcoming, days ahead', 'days', w.upcoming_days, 1, 60, ''));
+  }
+  setHTML('widgetGroups', rows.join(''));
+
+  setHTML('widgetRows',
+    stepperRow('Small', 'small', w.rows.small, ROW_BOUNDS.small[0], ROW_BOUNDS.small[1]) +
+    stepperRow('Medium', 'medium', w.rows.medium, ROW_BOUNDS.medium[0], ROW_BOUNDS.medium[1]) +
+    stepperRow('Large', 'large', w.rows.large, ROW_BOUNDS.large[0], ROW_BOUNDS.large[1]));
+
+  // The select keeps the hidden categories out like every other picker, but
+  // never drops the one that is currently chosen -- a control that cannot show
+  // its own value is not a control.
+  const cats = categoryList(w.category || '');
+  setHTML('widgetCat', '<option value="">All categories</option>' +
+    cats.map(c => '<option value="' + esc(c) + '"' +
+      (c === w.category ? ' selected' : '') + '>' + esc(c) + '</option>').join(''));
+  $('widgetCat').value = w.category || '';
+
+  setHTML('widgetOpts', switchRow(w.show_category, 'Show the category on each row',
+                                  'data-opt="show_category"', ''));
+}
+function widgetGroupsAct(g, act, key) {
+  if (g) {
+    putPrefs(p => {
+      const on = p.widget.groups.indexOf(g) >= 0;
+      p.widget.groups = on ? p.widget.groups.filter(x => x !== g)
+                           : WIDGET_GROUPS.filter(x => x === g || p.widget.groups.indexOf(x) >= 0);
+    });
+    return;
+  }
+  if (key === 'days') {
+    putPrefs(p => {
+      p.widget.upcoming_days = clampInt(p.widget.upcoming_days +
+                                        (act === 'inc' ? 1 : -1), 1, 60, 7);
+    });
+  }
+}
+function widgetRowsAct(fam, act) {
+  const b = ROW_BOUNDS[fam];
+  if (!b) return;
+  putPrefs(p => {
+    p.widget.rows[fam] = clampInt(p.widget.rows[fam] + (act === 'inc' ? 1 : -1),
+                                  b[0], b[1], p.widget.rows[fam]);
+  });
 }
 
 // The two fixed bars are the only things between the list and the bottom of
@@ -2026,6 +2838,178 @@ function buttonTap(uuid) {
   completeTask(uuid, { immediate: true });
 }
 
+// ---------------------------------------------------------------------------
+// reorder by dragging (prefs.sort.mode = "manual")
+// ---------------------------------------------------------------------------
+// Only in Manual, and only behind the Reorder toggle in the header: a handle on
+// every row all the time is a handle in the way of every scroll, and in the
+// other three modes there is nothing for it to do -- the server decides the
+// order from the due date, the priority or the urgency, and a row dragged
+// somewhere would jump back on the next refresh.
+//
+// The gesture is POINTER events, not HTML5 drag-and-drop: drag-and-drop does
+// not exist on iOS Safari or in a WKWebView, which is where this app actually
+// runs. The handle is the only element with `touch-action: none`, so a finger
+// anywhere else on the row still scrolls the list.
+//
+// A row may only move INSIDE its own list element, which is one group: the
+// group is decided by the due date (design.md D8) and dragging a task from
+// Upcoming into Today would be claiming to change when it is due.
+let reorderMode = false;
+let drag = null;
+const DRAG_EDGE = 90;    // px at the top and bottom that autoscroll
+
+function setReorderMode(on) {
+  reorderMode = !!on && sortMode() === 'manual';
+  if (drag) endDrag();
+  render();
+  if (reorderMode) toast('Drag the handles to reorder. Tap ≡ again when done.');
+}
+// Kept honest on every render: the toggle disappears with the mode, and a
+// reorder left on when the sort changes under it turns itself off.
+function paintReorder() {
+  const avail = sortMode() === 'manual' && current === 'tasks';
+  if (!avail && reorderMode) reorderMode = false;
+  const b = $('btnReorder');
+  b.hidden = !avail;
+  b.className = 'iconbtn' + (reorderMode ? ' on' : '');
+  b.setAttribute('aria-pressed', reorderMode ? 'true' : 'false');
+  $('reorderHint').hidden = !reorderMode;
+}
+
+function rowIds(list) {
+  return Array.prototype.map.call(list.querySelectorAll('.task'),
+                                  el => el.getAttribute('data-uuid'));
+}
+
+function startDrag(row, ev) {
+  if (!row || drag) return;
+  const list = row.parentElement;
+  if (!list || !list.classList.contains('list')) return;
+  // A row waiting out its grace must not also be dragged: it is about to
+  // collapse out of the list it is being dropped into.
+  if (isArmed(row.getAttribute('data-uuid'))) cancelArm(row.getAttribute('data-uuid'));
+  drag = {
+    row: row, list: list, id: ev.pointerId,
+    // PAGE coordinates. The page scrolls under the finger while dragging near
+    // an edge, and a viewport-relative offset would drift the row away from
+    // the finger by exactly the distance scrolled.
+    startY: ev.clientY + window.scrollY,
+    lastY: ev.clientY,
+    before: rowIds(list),
+    raf: 0
+  };
+  row.classList.add('dragging');
+  document.body.classList.add('dragging');
+  // The capture is what keeps the moves coming when the finger leaves the
+  // handle, which it does immediately.
+  try { ev.target.setPointerCapture(ev.pointerId); } catch (e) { /* not fatal */ }
+  drag.raf = requestAnimationFrame(dragTick);
+}
+
+// One frame: autoscroll near the edges, then re-decide the row's position.
+// The re-decide has to happen here and not only on pointermove, because a
+// finger held still in the autoscroll zone keeps moving the list past it.
+function dragTick() {
+  if (!drag) return;
+  // Nothing may rebuild the list under a finger. Asked for again every frame,
+  // so a drag that dies with its pointer unfreezes the screen in a second
+  // rather than for however long seemed generous at the start.
+  holdRender(1000);
+  const h = window.innerHeight;
+  let dv = 0;
+  if (drag.lastY < DRAG_EDGE) dv = -Math.ceil((DRAG_EDGE - drag.lastY) / 5);
+  else if (drag.lastY > h - DRAG_EDGE) dv = Math.ceil((drag.lastY - (h - DRAG_EDGE)) / 5);
+  if (dv) window.scrollBy(0, dv);
+  dragMove();
+  drag.raf = requestAnimationFrame(dragTick);
+}
+
+// Swap with a neighbour as soon as the finger passes its middle, then translate
+// the row to wherever the finger is. Swapping the DOM (rather than animating a
+// gap open) is what makes the drop trivial: the list IS the new order, and
+// startY is adjusted by the height that just moved past so the row stays under
+// the finger instead of jumping by a row.
+function dragMove() {
+  const d = drag;
+  if (!d) return;
+  for (let guard = 0; guard < 30; guard++) {
+    const next = d.row.nextElementSibling;
+    if (next && next.classList.contains('task')) {
+      const r = next.getBoundingClientRect();
+      if (d.lastY > r.top + r.height / 2) {
+        d.list.insertBefore(next, d.row);
+        d.startY += r.height;
+        continue;
+      }
+    }
+    const prev = d.row.previousElementSibling;
+    if (prev && prev.classList.contains('task')) {
+      const r = prev.getBoundingClientRect();
+      if (d.lastY < r.top + r.height / 2) {
+        d.list.insertBefore(d.row, prev);
+        d.startY -= r.height;
+        continue;
+      }
+    }
+    break;
+  }
+  d.row.style.transform = 'translateY(' + ((d.lastY + window.scrollY) - d.startY) + 'px)';
+}
+
+function endDrag() {
+  const d = drag;
+  if (!d) return;
+  drag = null;
+  if (d.raf) cancelAnimationFrame(d.raf);
+  d.row.style.transform = '';
+  d.row.classList.remove('dragging');
+  document.body.classList.remove('dragging');
+  renderHold = 0;
+  const after = rowIds(d.list);
+  if (after.join() === d.before.join()) { render(); return; }  // put back where it was
+  commitReorder(d.row.getAttribute('data-uuid'), after);
+}
+
+// Turn "these rows, in this order" into `order` numbers, per docs/api.md: a
+// group is numbered 1000-spaced the first time it is touched, and after that a
+// moved task takes the midpoint between its new neighbours. One PATCH per task
+// that actually changed, through the ordinary optimistic queue -- so a reorder
+// done on a train applies here now and reaches the server later, like every
+// other write (design.md D6).
+function commitReorder(movedUuid, uuids) {
+  const rows = uuids.map(u => currentTask(u)).filter(Boolean);
+  if (!rows.length) { render(); return; }
+  const nums = rows.map(t => (typeof t.order === 'number' ? t.order : null));
+  const idx = rows.map(t => t.uuid).indexOf(movedUuid);
+  const changes = [];
+  const renumber = () => {
+    changes.length = 0;
+    rows.forEach((t, i) => {
+      const v = (i + 1) * 1000;
+      if (t.order !== v) changes.push([t.uuid, v]);
+    });
+  };
+  if (idx < 0 || nums.some(n => n === null)) {
+    renumber();          // first reorder of this group
+  } else {
+    const before = idx > 0 ? nums[idx - 1] : null;
+    const after = idx < nums.length - 1 ? nums[idx + 1] : null;
+    let v;
+    if (before === null && after === null) v = 1000;
+    else if (before === null) v = after - 1000;
+    else if (after === null) v = before + 1000;
+    else v = (before + after) / 2;
+    // The gap between two neighbours has closed to nothing (about 50 halvings
+    // in), so there is no midpoint left to take. Space the whole group out
+    // again rather than sending a number that cannot hold its place.
+    if (!isFinite(v) || v === before || v === after) renumber();
+    else changes.push([movedUuid, v]);
+  }
+  for (const c of changes) enqueue({ kind: 'patch', uuid: c[0], body: { order: c[1] } });
+  if (!changes.length) render();
+}
+
 // ---- quick add ------------------------------------------------------------
 // A tap on Add is answered three ways: the button presses (#qaAdd:active), the
 // field clears, and the row that appears is washed with --flash for ~0.9 s so
@@ -2095,13 +3079,44 @@ function cycleQaDue() {
 // one the server has seen: docs/api.md), then anything a task on this phone is
 // using that the server has not heard of yet, which is what an offline-added
 // task with a brand new category is until it lands.
-function categoryList(extra) {
-  const out = (meta.projects || []).slice();
+// Every category the server knows, in the user's own order, hidden ones
+// INCLUDED and flagged: the Settings editor is the one place that has to see a
+// hidden category, because it is the only place that can bring it back.
+// /api/meta's `categories` is that list (api.md); `projects` is the fallback
+// for a server that does not send it yet, and the task list is the fallback
+// after that -- an offline-added category exists on this phone alone until it
+// lands.
+function allCategories() {
+  const out = [];
+  const push = p => { if (p && out.indexOf(p) === -1) out.push(p); };
+  if (Array.isArray(meta.categories) && meta.categories.length) {
+    for (const c of meta.categories) if (c) push(c.name);
+  } else {
+    for (const p of (meta.projects || [])) push(p);
+  }
   const v = project();
   const local = [];
   for (const t of v.pend.concat(v.done)) {
+    if (t.project && out.indexOf(t.project) === -1 && local.indexOf(t.project) === -1) {
+      local.push(t.project);
+    }
+  }
+  local.sort();
+  for (const p of local) push(p);
+  return out;
+}
+
+function categoryList(extra) {
+  const out = [];
+  const v = project();
+  // Hidden means "not offered": it is gone from this picker, gone from the
+  // quick-add chip and gone from the chip row -- but every task in it is still
+  // in the list, because hiding a category is not filing its tasks away.
+  for (const p of allCategories()) if (!isHiddenCat(p)) out.push(p);
+  const local = [];
+  for (const t of v.pend.concat(v.done)) {
     const p = t.project;
-    if (p && out.indexOf(p) === -1 && local.indexOf(p) === -1) local.push(p);
+    if (p && !isHiddenCat(p) && out.indexOf(p) === -1 && local.indexOf(p) === -1) local.push(p);
   }
   local.sort();
   for (const p of local) out.push(p);
@@ -2143,23 +3158,49 @@ function paintQaHint() {
   measureBars();
 }
 
-function openCatPicker() {
-  const cur = qaCategoryValue();
-  const rows = [['', 'None']].concat(categoryList(cur).map(c => [c, c]));
-  $('catHint').textContent = filterProject()
-    ? 'The ' + filterProject() + ' filter is choosing this. Picking another moves the filter too.'
-    : 'Every new task gets this until you change it.';
-  $('catList').innerHTML = rows.map(r =>
-    '<button data-cat="' + esc(r[0]) + '"' + (r[0] === cur ? ' class="on"' : '') +
-      ' aria-pressed="' + (r[0] === cur ? 'true' : 'false') + '">' +
+// ONE picker sheet, used by everything that has to choose a category: the
+// quick-add chip, and "where do this category's tasks go?" when one is
+// deleted. A second sheet that looked the same and behaved slightly
+// differently is how two lists of categories start disagreeing (design.md
+// D13), so there is one, and the caller supplies the rows and what a tap
+// means.
+//   rows: [value, label, extraClass?]
+let pickHandler = null;
+function openPick(opts) {
+  pickHandler = opts.onPick || null;
+  $('catTitle').textContent = opts.title || 'Choose';
+  $('catSheet').setAttribute('aria-label', opts.title || 'Choose');
+  const hint = $('catHint');
+  hint.textContent = opts.hint || '';
+  hint.hidden = !opts.hint;
+  $('catList').innerHTML = (opts.rows || []).map(r => {
+    const on = r[0] === opts.current;
+    const cls = [on ? 'on' : '', r[2] || ''].filter(Boolean).join(' ');
+    return '<button data-cat="' + esc(r[0]) + '"' +
+      (cls ? ' class="' + cls + '"' : '') +
+      ' aria-pressed="' + (on ? 'true' : 'false') + '">' +
       '<span>' + esc(r[1]) + '</span>' +
       '<span class="tick" aria-hidden="true">✓</span>' +
-    '</button>').join('') +
-    '<button data-cat="__new__" class="new"><span>New category…</span></button>';
+    '</button>';
+  }).join('');
   $('catSheet').hidden = false;
   $('catSheet').querySelector('.inner').scrollTop = 0;
 }
-function closeCatPicker() { $('catSheet').hidden = true; }
+function closeCatPicker() { $('catSheet').hidden = true; pickHandler = null; }
+
+function openCatPicker() {
+  const cur = qaCategoryValue();
+  openPick({
+    title: 'Category',
+    hint: filterProject()
+      ? 'The ' + filterProject() + ' filter is choosing this. Picking another moves the filter too.'
+      : 'Every new task gets this until you change it.',
+    current: cur,
+    rows: [['', 'None']].concat(categoryList(cur).map(c => [c, c]))
+            .concat([['__new__', 'New category…', 'new']]),
+    onPick: chooseCategory
+  });
+}
 
 function chooseCategory(v) {
   if (v === '__new__') { newCategory(); return; }
@@ -2255,6 +3296,7 @@ function openSheet(uuid) {
   $('shDate').value = p ? p.date : '';
   $('shTime').value = p && p.time ? p.time : '';
 
+  fillRecur(t);
   paintSheetTags();
   paintAnnos(t);
 
@@ -2274,6 +3316,42 @@ function closeSheet() {
   $('sheet').hidden = true;
   sheetUuid = ''; shTask = null;
 }
+// ---- repeat (api.md, "Recurrence") ----------------------------------------
+// The period belongs to the recurring TEMPLATE. Editing it from an instance is
+// the normal case and the server forwards it to the parent; setting one on a
+// plain task turns that task into a template and answers with its first
+// instance, which drain() swaps in for the row that was there.
+function fillRecur(t) {
+  const v = t.recur || '';
+  const known = RECUR_OPTIONS.indexOf(v) >= 0;
+  $('shRecur').value = v ? (known ? v : '__custom__') : '';
+  $('shRecurCustom').value = (v && !known) ? v : '';
+  $('shUntil').value = t.until || '';
+  paintRecur();
+}
+function paintRecur() {
+  const sel = $('shRecur').value;
+  $('shRecurCustom').hidden = sel !== '__custom__';
+  // "Until" is meaningless with nothing to stop, so it is only on screen once
+  // a period is chosen.
+  $('shUntilRow').hidden = !sel;
+  const hint = $('shRecurHint');
+  const wasRepeating = !!(shTask && shTask.recur);
+  if (!sel && wasRepeating) {
+    hint.hidden = false;
+    hint.textContent = 'Saving now stops the repeat: future occurrences are ' +
+                       'removed and this one stays as an ordinary task.';
+  } else if (sel) {
+    hint.hidden = false;
+    hint.textContent = 'Completing it creates the next one. The period belongs ' +
+                       'to the repeat, so changing it changes every occurrence ' +
+                       'still to come.';
+  } else {
+    hint.hidden = true;
+    hint.textContent = '';
+  }
+}
+
 function paintPriority() {
   Array.from($('shPriority').children).forEach(b => {
     const on = (b.getAttribute('data-p') || '') === shPriority;
@@ -2329,6 +3407,31 @@ function sheetSave() {
   const due = joinDue($('shDate').value || '', $('shTime').value || '');
   if ((due || null) !== (t.due || null)) body.due = due;
 
+  // Repeat. Three shapes, and each one is worth stopping the save for:
+  //   * a custom period that is not a period at all -- refused here rather
+  //     than becoming a queued op the server drops with a 422;
+  //   * a period with no due date -- Taskwarrior has nothing to recur from,
+  //     and the server says so with a 422 (api.md);
+  //   * turning a repeat OFF -- that deletes the template and every future
+  //     occurrence with it, which is not something to discover afterwards.
+  let recur = $('shRecur').value;
+  if (recur === '__custom__') {
+    recur = $('shRecurCustom').value.trim().toLowerCase();
+    if (!RECUR_RE.test(recur)) { toast(RECUR_RULE, { bad: true }); return; }
+  }
+  if (recur !== (t.recur || '')) {
+    if (!recur) {
+      if (!window.confirm('Stop repeating?\n\n' +
+                          'Future occurrences are removed; this one stays.')) return;
+      body.recur = null;
+    } else {
+      if (!due) { toast('A repeating task needs a due date.', { bad: true }); return; }
+      body.recur = recur;
+    }
+  }
+  const until = recur ? ($('shUntil').value || '') : '';
+  if (until !== (t.until || '')) body.until = until || null;
+
   const oldTags = (t.tags || []).slice().sort().join(',');
   if (shTags.slice().sort().join(',') !== oldTags) body.tags = shTags.slice();
 
@@ -2365,6 +3468,9 @@ function route() {
   // outlived the screen it was started on can only fire into a list nobody is
   // looking at. See flushArmed().
   flushArmed();
+  // A drag that outlives the screen it started on would drop a row into a list
+  // that is no longer painted.
+  if (drag) endDrag();
   // The category picker is not a route (it is a chip's menu, not a screen), so
   // nothing else would take it down when the screen moves out from under it.
   closeCatPicker();
@@ -2375,7 +3481,13 @@ function route() {
       show('done'); render(); refresh(true); break;
     case 'settings':
       if (sheetUuid) closeSheet();
-      show('settings'); fillSettings(); render(); break;
+      show('settings'); fillSettings(); render();
+      // The four editors down there are the server's own document and the
+      // category list behind them is /api/meta's, so both are asked for when
+      // the screen that shows them opens rather than on the 30 s beat.
+      loadMeta().then(render);
+      loadPrefs(true).then(render);
+      break;
     case 'task':
       // The sheet is a route so it survives a reload and can be linked
       // straight to — which is also how the screenshot of it is taken.
@@ -2422,6 +3534,33 @@ function listClick(ev) {
 $('groups').addEventListener('click', listClick);
 $('doneGroups').addEventListener('click', listClick);
 
+// ---- reorder --------------------------------------------------------------
+$('btnReorder').addEventListener('click', () => setReorderMode(!reorderMode));
+// pointerdown, not mousedown/touchstart: one code path covers the mouse in the
+// dev browser and the finger on the phone, and the capture below keeps the
+// moves coming after the finger leaves the 44px handle.
+$('groups').addEventListener('pointerdown', ev => {
+  const h = ev.target.closest('.draghandle');
+  if (!h) return;
+  ev.preventDefault();
+  startDrag(h.closest('.task'), ev);
+});
+document.addEventListener('pointermove', ev => {
+  if (!drag || ev.pointerId !== drag.id) return;
+  ev.preventDefault();          // or the page scrolls instead of the row moving
+  drag.lastY = ev.clientY;
+  dragMove();
+}, { passive: false });
+document.addEventListener('pointerup', ev => {
+  if (drag && ev.pointerId === drag.id) endDrag();
+});
+// A cancel is the OS taking the touch away (a call, the app switcher, a
+// gesture the browser claimed). The row is dropped where it is rather than
+// left mid-drag with the list frozen behind it.
+document.addEventListener('pointercancel', ev => {
+  if (drag && ev.pointerId === drag.id) endDrag();
+});
+
 $('filterbar').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-f]');
   if (b) setFilter(b.getAttribute('data-f'));
@@ -2439,7 +3578,7 @@ $('catSheet').addEventListener('click', ev => {
 });
 $('catList').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-cat]');
-  if (b) chooseCategory(b.getAttribute('data-cat'));
+  if (b && pickHandler) pickHandler(b.getAttribute('data-cat'));
 });
 $('qaDate').addEventListener('change', function () { qaPickedDate = this.value; paintQaDue(); });
 $('qaPickClear').addEventListener('click', () => {
@@ -2491,6 +3630,11 @@ $('shAddTag').addEventListener('click', addTagFromInput);
 $('shNewTag').addEventListener('keydown', ev => {
   if (ev.key === 'Enter') { ev.preventDefault(); addTagFromInput(); }
 });
+$('shRecur').addEventListener('change', function () {
+  paintRecur();
+  if (this.value === '__custom__') $('shRecurCustom').focus();
+});
+$('shClearUntil').addEventListener('click', () => { $('shUntil').value = ''; });
 $('shClearTime').addEventListener('click', () => { $('shTime').value = ''; });
 $('shClearDue').addEventListener('click', () => { $('shDate').value = ''; $('shTime').value = ''; });
 
@@ -2564,12 +3708,63 @@ $('setTest').addEventListener('click', async () => {
   }
 });
 $('setRetry').addEventListener('click', () => syncNow(false));
+
+// ---- the preference editors ------------------------------------------------
+// One listener per card, reading data- attributes off the button that was
+// tapped: the cards are rebuilt from prefs on every render, so nothing here may
+// hold a reference to an element inside one.
+$('sortEditor').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-sort]');
+  if (!b) return;
+  const mode = b.getAttribute('data-sort');
+  if (mode === sortMode()) return;
+  putPrefs(p => { p.sort.mode = mode; }).then(ok => {
+    if (!ok) return;
+    if (mode !== 'manual') reorderMode = false;
+    // The ORDER of the list is the server's answer and it has just changed, so
+    // the cached one is wrong and its ETag would answer 304 to the question.
+    etag = ''; lsDel(K.etag);
+    refresh(true);
+  });
+});
+$('catEditor').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-act]');
+  if (b) catEditorAct(b.getAttribute('data-act'), b.getAttribute('data-key'));
+});
+$('chipEditor').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-act]');
+  if (b) chipEditorAct(b.getAttribute('data-act'), b.getAttribute('data-key'));
+});
+$('widgetGroups').addEventListener('click', ev => {
+  const sw = ev.target.closest('button[data-g]');
+  if (sw) { widgetGroupsAct(sw.getAttribute('data-g'), '', ''); return; }
+  const b = ev.target.closest('button[data-act]');
+  if (b) widgetGroupsAct('', b.getAttribute('data-act'), b.getAttribute('data-key'));
+});
+$('widgetRows').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-act]');
+  if (b) widgetRowsAct(b.getAttribute('data-key'), b.getAttribute('data-act'));
+});
+$('widgetCat').addEventListener('change', function () {
+  const v = this.value || null;
+  putPrefs(p => { p.widget.category = v; });
+});
+$('widgetOpts').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-opt]');
+  if (b) putPrefs(p => { p.widget.show_category = !p.widget.show_category; });
+});
 $('setClear').addEventListener('click', () => {
   const n = queue.length;
   const warn = n ? ('\n\n' + n + ' change' + (n > 1 ? 's have' : ' has') +
                     ' not reached the server yet and will be lost.') : '';
   if (!window.confirm('Clear the local cache?' + warn)) return;
   srvTasks = []; srvDone = []; queue = []; etag = ''; etagDone = ''; lastSync = '';
+  // tm.prefs is NOT in this list, and neither are tm.filter and tm.qaCategory.
+  // It is a cache of a document that lives on the SERVER -- clearing it would
+  // change nothing there and lose nothing here that the next refresh does not
+  // fetch back, but on a phone that cannot reach the server it would drop the
+  // category order and the chip row to their defaults with no way to get them
+  // back until it can. A cache clear must not be able to make the screen worse.
   [K.tasks, K.done, K.queue, K.etag, K.etagDone, K.lastSync, K.meta].forEach(lsDel);
   render();
   toast('Cache cleared');

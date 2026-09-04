@@ -1,13 +1,24 @@
 //
 //  TaskMasterWidget.swift
-//  The home-screen widget: overdue + due-today, straight from the API, with a
-//  tap-to-complete check box on every row.
+//  The home-screen widget: the server's widget feed, drawn one row per line,
+//  with a tap-to-complete check box on every row.
 //
-//  This is the native replacement for scriptable-today-widget.js in
-//  ~/projects/dashboards, and it deliberately shows the same thing: a "Today"
-//  header with a count, overdue rows first in red, then today's, "+N more"
-//  when the list is longer than the family fits, "Nothing due" when it is
-//  empty, and a small "updated Xm ago" footer so a stale render is obvious.
+//  WHAT IS SHOWN IS NOT DECIDED HERE (design.md D14). This file used to GET
+//  /api/tasks and work out for itself which tasks were overdue or due today,
+//  in what order, and under what label. It does none of that any more: it GETs
+//  /api/widget, and the SERVER — applying the user's `prefs.widget`, which the
+//  app edits under Settings → Widget — decides which groups are in (overdue /
+//  today / upcoming / none), which category, how many rows each family gets,
+//  whether the category is drawn, and what each row's due label says. The rows
+//  arrive in display order and are drawn in the order they arrive.
+//
+//  So "the widget is showing the wrong thing" is a Settings change or a server
+//  change, and never a change here. What IS still this file's business: the
+//  chrome — the "Today" header and its count, "+N more", "Nothing due 🎉", the
+//  "updated Xm ago" footer — the layout of a row, the check box, and the cache.
+//
+//  It is still the native replacement for scriptable-today-widget.js in
+//  ~/projects/dashboards, which is fed separately by `pa` and unaffected (D1).
 //
 //  It fetches the API ITSELF rather than reading anything the app wrote
 //  (design.md D7). The app and this extension are separate bundles with
@@ -89,10 +100,11 @@ private func serverBase() -> String? {
     return base
 }
 
-/// `status=pending` is the default (api.md), but say it out loud — the widget
-/// only ever wants the pending list, and a future change of default should not
-/// silently change what the home screen shows.
-private let kTasksPath = "/api/tasks?status=pending"
+/// The feed, and the whole of what this widget knows (api.md, "Widget feed").
+/// No query string: every choice that used to be one — pending only, which
+/// groups, how many rows, which category — now lives in `prefs.widget` on the
+/// server, so there is nothing left to ask for.
+private let kWidgetPath = "/api/widget"
 
 /// 10 s, the same budget the Scriptable widget used. WidgetKit kills a slow
 /// refresh anyway; failing fast leaves time to paint the cache instead.
@@ -130,73 +142,119 @@ private let kGraceNanoseconds: UInt64 = 3_000_000_000
 /// check mark would otherwise sit on that row for good. Swept in getTimeline.
 private let kArmedMaxAge: TimeInterval = 60
 
-// MARK: - The API's Task, cut down to what a row needs
+// MARK: - The widget feed, exactly as api.md spells it
+//
+// `{"updated": iso, "total": int, "rows": [{uuid, text, due, overdue, group,
+// category}], "caps": {small, medium, large}}`.
+//
+// Every field but `uuid`, `text` and `rows` itself is Optional, so the
+// synthesised decoder uses decodeIfPresent and a server that omits one — or
+// sends null — loses that field instead of failing the whole feed. `rows` is
+// deliberately NOT optional: it is what makes this a widget feed, and requiring
+// it is what keeps a 403 body or a captive portal's HTML from decoding to an
+// empty list and being cached over the last good one.
+//
+// Dates: there are none here any more. `due` arrives as the finished LABEL the
+// server built in the server's zone ("overdue", "today", "2:30 pm",
+// "Thu Sep 4", ""), and this file never parses, compares or formats a date
+// again. The string-comparison rule that used to live here (design.md D3, the
+// twin of groupOf() in www/index.html) now lives on the server, once, for the
+// app and the widget both.
 
-/// Only the fields the widget draws, plus `priority`, which it never draws and
-/// only sorts on (api.md, "Canonical order"). Codable ignores everything else in
-/// the object (api.md ships ~15 keys), so the server can grow without touching
-/// this. `description` is renamed on the way in: a stored property called
-/// `description` shadows CustomStringConvertible and reads badly at every use.
-///
-/// `priority` is Optional, so the synthesised decoder uses decodeIfPresent: a
-/// task with no priority — which is most of them — decodes to nil rather than
-/// failing the whole array.
-private struct APITask: Decodable {
+private struct FeedRow: Decodable {
     let uuid: String
+    /// Already flattened to one line by the server.
     let text: String
+    /// The label to DRAW. Not a date, not parsed, not reformatted.
     let due: String?
-    let priority: String?
+    /// The only thing that decides the red.
+    let overdue: Bool?
+    /// "overdue" | "today" | "upcoming" | "none". Informational: the rows are
+    /// already grouped and ordered, so nothing here reads it. Decoded so the
+    /// shape in this file matches the shape in api.md.
+    let group: String?
+    /// Filled only when `prefs.widget.show_category` is on; "" or absent when
+    /// it is off, and then nothing is drawn.
+    let category: String?
+}
 
-    enum CodingKeys: String, CodingKey {
-        case uuid
-        case text = "description"
-        case due
-        case priority
+/// `prefs.widget.rows` echoed back, so a row count chosen in Settings reaches
+/// the home screen without a rebuild.
+private struct FeedCaps: Decodable {
+    let small: Int?
+    let medium: Int?
+    let large: Int?
+}
+
+private struct WidgetFeed: Decodable {
+    /// When the SERVER built this feed. Decoded because api.md lists it; not
+    /// drawn — see footerText, which is about when this WIDGET last got data.
+    let updated: String?
+    /// Everything that qualified, before the server's own `rows.large` limit.
+    /// It is what "+N more" counts against.
+    let total: Int?
+    let rows: [FeedRow]
+    /// `prefs.widget.rows` echoed back under its OWN key — "a separate key,
+    /// since `rows` is the array" (api.md, which said `rows` for both until the
+    /// collision was spotted building this). Absent, kFits* stands.
+    let caps: FeedCaps?
+
+    // No CodingKeys: every property above is spelled exactly as the wire is.
+}
+
+// MARK: - How many rows a family gets
+
+/// What each family has ROOM for at the 26 pt row height below. The ceiling on
+/// anything Settings asks for, and the answer when the feed carries no caps.
+private let kFitsSmall = 3
+private let kFitsMedium = 5   // 5 × 26 pt rows + header + footer fit the 170 pt medium family; 6 did not
+private let kFitsLarge = 12
+
+/// The resolved caps for one feed: never optional past this point, so the view
+/// has one rule (`min(cap, what fits)`) and no fallbacks scattered through it.
+///
+/// Internal, not private, for the reason given above TodayRow: it is stored on
+/// TodayEntry, which is internal, and Swift refuses an internal declaration
+/// whose type is private.
+struct RowCaps {
+    let small: Int
+    let medium: Int
+    let large: Int
+
+    /// What the widget did before the server had an opinion, and what it does
+    /// again when the feed carries no caps.
+    static let fallback = RowCaps(small: kFitsSmall, medium: kFitsMedium, large: kFitsLarge)
+
+    func cap(for family: WidgetFamily) -> Int {
+        switch family {
+        case .systemSmall:  return small
+        case .systemMedium: return medium
+        default:            return large
+        }
     }
 }
 
+/// One cap, or the fallback. Absent and null both mean "unset"; so does anything
+/// <= 0, which would otherwise draw a header, a footer and no tasks at all — a
+/// widget indistinguishable from a broken one, and there is no way to tell a
+/// deliberate zero from a bad write.
+private func saneCap(_ n: Int?, _ fallback: Int) -> Int {
+    guard let n = n, n > 0 else { return fallback }
+    return n
+}
+
+private func capsFrom(_ f: FeedCaps?) -> RowCaps {
+    guard let f = f else { return .fallback }
+    return RowCaps(small: saneCap(f.small, kFitsSmall),
+                   medium: saneCap(f.medium, kFitsMedium),
+                   large: saneCap(f.large, kFitsLarge))
+}
+
 // MARK: - Dates
-//
-// `due` is a LOCAL wall-clock string, "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM"
-// (api.md, design.md D3). The classification below is the same rule as
-// groupOf() in www/index.html, written the same way for the same reason:
-// compare "YYYY-MM-DD" strings, never Date instants. Building a Date from a due
-// and comparing instants is how a task due today jumps into Overdue at 19:00
-// Chicago time, once the UTC day has rolled over.
 
-/// "2026-09-05T14:30" -> ("2026-09-05", "14:30"); date-only -> time nil.
-private func dueParts(_ due: String?) -> (date: String, time: String?)? {
-    guard let due = due, due.count >= 10 else { return nil }
-    let date = String(due.prefix(10))
-    guard let t = due.firstIndex(of: "T") else { return (date, nil) }
-    let after = due[due.index(after: t)...]
-    guard after.count >= 5 else { return (date, nil) }
-    return (date, String(after.prefix(5)))
-}
-
-/// Today as a local "YYYY-MM-DD" — the string todayStr(0) builds in the client.
-private func localToday() -> String {
-    let c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
-    return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
-}
-
-/// Now as a local "HH:MM" — nowHHMM() in the client.
-private func localNowHHMM() -> String {
-    let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
-    return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
-}
-
-/// "14:30" -> "2:30 pm". Hand-rolled rather than DateFormatter because the
-/// input is already a wall-clock string, and round-tripping it through a Date
-/// would drag a time zone back into a calculation that has none.
-private func fmtClock(_ hhmm: String) -> String {
-    guard hhmm.count >= 5, let h = Int(hhmm.prefix(2)) else { return hhmm }
-    let m = String(hhmm.dropFirst(3).prefix(2))
-    let h12 = (h % 12) == 0 ? 12 : (h % 12)
-    return "\(h12):\(m) " + (h < 12 ? "am" : "pm")
-}
-
-/// "just now" / "7m ago" / "3h ago" — the Scriptable widget's ago().
+/// "just now" / "7m ago" / "3h ago" — the Scriptable widget's ago(). The one
+/// piece of date arithmetic left in this file, and it is about the FETCH, not
+/// about any task.
 private func agoLabel(_ since: Date) -> String {
     let mins = Int((Date().timeIntervalSince(since) / 60).rounded())
     if mins < 1 { return "just now" }
@@ -213,22 +271,25 @@ private func agoLabel(_ since: Date) -> String {
 struct TodayRow: Identifiable {
     let id: String
     let text: String
+    /// The server's label, drawn verbatim. May be "" — an upcoming-only feed
+    /// with no clock on the task has nothing to say on the right of the row.
     let due: String
     let overdue: Bool
-    /// Sorts overdue above today, then by when it is due, then by priority,
-    /// then by uuid so the order is TOTAL — Swift's sort is not stable, and two
-    /// tasks due in the same minute must not shuffle places between refreshes.
-    /// It is docs/api.md's "Canonical order" key with the group rank glued on
-    /// the front; orderKey() in www/index.html builds the same string, which is
-    /// the whole point of design.md D8 — change one and you change both.
-    let sortKey: String
+    /// "" unless Settings → Widget asked for it. Never a lookup: whether a
+    /// category appears is the server's call, and this is only whether to draw
+    /// the string it sent.
+    let category: String
 }
 
 struct TodayEntry: TimelineEntry {
     let date: Date
     let rows: [TodayRow]
-    /// Everything that qualified, before the family's row limit truncated it.
+    /// Everything that qualified, straight from the feed's `total` — counted by
+    /// the server before its own row limit, and so still right for "+N more"
+    /// after this family truncates further.
     let total: Int
+    /// The per-family row counts this feed came with, already resolved.
+    let caps: RowCaps
     /// When the shown list was actually fetched; nil when there has never been
     /// a successful fetch.
     let updated: Date?
@@ -243,116 +304,76 @@ struct TodayEntry: TimelineEntry {
     let armed: Set<String>
 }
 
-/// "H"/"M"/"L"/nil -> "0"/"1"/"2"/"3" — the `<prio>` character of the canonical
-/// sort key (api.md). A switch over a non-optional String rather than over the
-/// Optional itself: matching an Optional against a string literal does work,
-/// but there is nothing to be clever about here. Anything the server might one
-/// day add that is not H/M/L sorts last, alongside the unset ones, which is the
-/// same thing an unknown priority does in the client.
-private func prioRank(_ priority: String?) -> String {
-    switch priority ?? "" {
-    case "H": return "0"
-    case "M": return "1"
-    case "L": return "2"
-    default:  return "3"
-    }
+/// One decoded feed: the rows to draw, the count to draw them against, and the
+/// caps that came with them. Private, because nothing internal names it — it is
+/// only ever a local inside a function body.
+private struct FeedContents {
+    let rows: [TodayRow]
+    let total: Int
+    let caps: RowCaps
 }
 
-/// Turns a decoded list into the rows the widget draws: overdue + due today
-/// only, sorted, labelled. Upcoming and undated tasks are deliberately absent —
-/// this is the "Today" widget, and the app is one tap away for the rest.
-private func rowsFrom(_ tasks: [APITask]) -> [TodayRow] {
-    let today = localToday()
-    let now = localNowHHMM()
-    var out: [TodayRow] = []
+/// Decodes a response body. nil when the body is not the feed api.md promises —
+/// which is also how a 403 body or a captive-portal HTML page gets rejected
+/// instead of cached over the good data.
+///
+/// The mapping is deliberately dull: it renames nothing, decides nothing, and
+/// re-orders nothing. Two defensive touches only, both about DRAWING rather
+/// than about meaning — the newline flatten (the server flattens `text`
+/// already; a stray one would still break a one-line row) and the empty-text
+/// placeholder, which is also what the trim is for.
+private func decodeFeed(_ data: Data) -> FeedContents? {
+    guard let feed = try? JSONDecoder().decode(WidgetFeed.self, from: data) else { return nil }
 
-    for t in tasks {
-        guard let p = dueParts(t.due) else { continue }   // no due -> not today's problem
-        if p.date > today { continue }                    // upcoming
-
-        let overdue: Bool
-        if p.date < today {
-            overdue = true
-        } else if let time = p.time, time <= now {
-            // Due at 09:00 is overdue at 09:01. A DATE-ONLY due today is NOT
-            // overdue until tomorrow, because date-only means "some time today"
-            // (design.md D3) — which is why this is `if let time`, not `?? ""`.
-            overdue = true
-        } else {
-            overdue = false
-        }
-
-        let label: String
-        if overdue {
-            label = "overdue"
-        } else if let time = p.time {
-            label = fmtClock(time)
-        } else {
-            label = "today"
-        }
-
-        // Descriptions may contain newlines (api.md); a row is one line.
-        let flat = t.text
+    // The closure is spelled out — parameter type and result type both — rather
+    // than left to inference. It is multi-statement, and a body the type-checker
+    // has to solve from scratch is what makes a Swift build slow on a runner
+    // nobody is watching.
+    let rows: [TodayRow] = feed.rows.map { (r: FeedRow) -> TodayRow in
+        let flat: String = r.text
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // api.md's canonical key — <date>T<HH:MM|99:99><prio><uuid> — with the
-        // group rank in front, so one sort puts overdue above today instead of
-        // two sorts over two arrays. Every part is fixed-width or ends in a
-        // separator ("T", then a 5-char clock, then one prio digit), so plain
-        // string comparison stays positional: no field can bleed into the next.
-        //
-        // Built in steps with explicit types rather than one six-term
-        // expression: a long chain of `+` over String with a ternary and a `??`
-        // in it is exactly the shape that makes the Swift type-checker slow,
-        // and this file has to compile on a runner nobody is watching.
-        let rank: String = overdue ? "0" : "1"
-        let clock: String = p.time ?? "99:99"
-        let prio: String = prioRank(t.priority)
-        let sortKey: String = rank + p.date + "T" + clock + prio + t.uuid
-
-        out.append(TodayRow(
-            id: t.uuid,
-            text: flat.isEmpty ? "(no description)" : flat,
-            due: label,
-            overdue: overdue,
-            sortKey: sortKey))
+        return TodayRow(id: r.uuid,
+                        text: flat.isEmpty ? "(no description)" : flat,
+                        due: r.due ?? "",
+                        overdue: r.overdue ?? false,
+                        category: r.category ?? "")
     }
 
-    out.sort { $0.sortKey < $1.sortKey }
-    return out
+    // `total` counts what qualified server-side, so it is >= rows.count and is
+    // what "+N more" is measured against. Missing, the rows themselves are the
+    // only count there is.
+    return FeedContents(rows: rows,
+                        total: feed.total ?? rows.count,
+                        caps: capsFrom(feed.caps))
 }
 
-/// Decodes a response body into rows. nil when the body is not the array of
-/// tasks api.md promises — which is also how a 403 body or a captive-portal
-/// HTML page gets rejected instead of cached over the good data.
-private func decodeRows(_ data: Data) -> [TodayRow]? {
-    guard let tasks = try? JSONDecoder().decode([APITask].self, from: data) else { return nil }
-    return rowsFrom(tasks)
-}
-
-/// The last body that parsed, re-decoded NOW so the overdue/today split and the
-/// clock labels are right for the current time even though the data is old.
-/// Re-decoding rather than caching finished rows is the whole reason it is the
-/// raw body that gets stored.
+/// The last body that parsed, decoded again on the way out. Storing the raw
+/// body rather than finished rows is what lets the decode change — as it just
+/// did — without a cache format to migrate, and it costs nothing.
+///
+/// What it no longer does is RECOMPUTE anything: the labels in a cached body are
+/// the ones the server wrote when it was fetched, so a cache that survives
+/// midnight can say "today" about yesterday. That is what the "updated Xm ago"
+/// footer is for, and it is the same trade as showing a stale list at all.
 ///
 /// `armed` is passed in rather than read here: the cache is also what the
 /// gallery's snapshot is built from, and nothing in the gallery is mid-grace.
 private func cachedEntry(armed: Set<String>) -> TodayEntry? {
     let store = UserDefaults.standard
     guard let body = store.data(forKey: kCacheBodyKey),
-          let rows = decodeRows(body) else { return nil }
+          let feed = decodeFeed(body) else { return nil }
     let when = store.object(forKey: kCacheDateKey) as? Date
-    return TodayEntry(date: Date(), rows: rows, total: rows.count, updated: when,
-                      error: nil, armed: armed)
+    return TodayEntry(date: Date(), rows: feed.rows, total: feed.total, caps: feed.caps,
+                      updated: when, error: nil, armed: armed)
 }
 
-/// GET /api/tasks?status=pending. Completion handlers, not async/await: this
-/// target is compiled in Swift 5 language mode and a callback URLSession keeps
-/// every actor and Sendable question off the table. Free functions rather than
-/// methods for the same reason — nothing captures self.
-private func fetchRows(_ done: @escaping ([TodayRow]?, Data?) -> Void) {
-    guard let base = serverBase(), let url = URL(string: base + kTasksPath) else {
+/// GET /api/widget. Completion handlers, not async/await: this target is
+/// compiled in Swift 5 language mode and a callback URLSession keeps every actor
+/// and Sendable question off the table. Free functions rather than methods for
+/// the same reason — nothing captures self.
+private func fetchFeed(_ done: @escaping (FeedContents?, Data?) -> Void) {
+    guard let base = serverBase(), let url = URL(string: base + kWidgetPath) else {
         done(nil, nil)
         return
     }
@@ -366,11 +387,11 @@ private func fetchRows(_ done: @escaping ([TodayRow]?, Data?) -> Void) {
 
     let task = session.dataTask(with: url) { data, response, _ in
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200, let data = data, let rows = decodeRows(data) else {
+        guard code == 200, let data = data, let feed = decodeFeed(data) else {
             done(nil, nil)
             return
         }
-        done(rows, data)
+        done(feed, data)
     }
     task.resume()
     // Nothing else is queued on this session; let it tear down when the one
@@ -557,13 +578,16 @@ struct TaskMasterProvider: TimelineProvider {
         // ids are not uuids on purpose — the gallery does not run intents, and
         // if one ever did, the server refuses anything that is not a full
         // 36-character uuid (api.md) and CompleteTaskIntent swallows the 404.
+        //
+        // No categories on these: `show_category` is off by default, so this is
+        // what the widget looks like out of the box.
         let rows = [
-            TodayRow(id: "1", text: "Water the plants", due: "overdue", overdue: true, sortKey: "0"),
-            TodayRow(id: "2", text: "Call the dentist", due: "2:30 pm", overdue: false, sortKey: "1"),
-            TodayRow(id: "3", text: "Pay the water bill", due: "today", overdue: false, sortKey: "2")
+            TodayRow(id: "1", text: "Water the plants", due: "overdue", overdue: true, category: ""),
+            TodayRow(id: "2", text: "Call the dentist", due: "2:30 pm", overdue: false, category: ""),
+            TodayRow(id: "3", text: "Pay the water bill", due: "today", overdue: false, category: "")
         ]
-        return TodayEntry(date: Date(), rows: rows, total: rows.count, updated: Date(),
-                          error: nil, armed: [])
+        return TodayEntry(date: Date(), rows: rows, total: rows.count, caps: .fallback,
+                          updated: Date(), error: nil, armed: [])
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TodayEntry) -> Void) {
@@ -587,29 +611,29 @@ struct TaskMasterProvider: TimelineProvider {
         // say what is actually wrong instead of "can't reach", which would send
         // whoever reads it to the Tailscale app for no reason.
         guard serverBase() != nil else {
-            let entry = TodayEntry(date: Date(), rows: [], total: 0, updated: nil,
-                                   error: "Server not configured", armed: armed)
+            let entry = TodayEntry(date: Date(), rows: [], total: 0, caps: .fallback,
+                                   updated: nil, error: "Server not configured", armed: armed)
             completion(Timeline(entries: [entry], policy: .after(next)))
             return
         }
 
-        fetchRows { rows, body in
+        fetchFeed { feed, body in
             let entry: TodayEntry
-            if let rows = rows, let body = body {
+            if let feed = feed, let body = body {
                 let now = Date()
                 let store = UserDefaults.standard
                 store.set(body, forKey: kCacheBodyKey)
                 store.set(now, forKey: kCacheDateKey)
-                entry = TodayEntry(date: now, rows: rows, total: rows.count, updated: now,
-                                   error: nil, armed: armed)
+                entry = TodayEntry(date: now, rows: feed.rows, total: feed.total,
+                                   caps: feed.caps, updated: now, error: nil, armed: armed)
             } else if let cached = cachedEntry(armed: armed) {
                 // Off the tailnet, or the server is down. The last good list is
                 // more useful than an error, and the "updated Xm ago" footer is
                 // what admits it is stale.
                 entry = cached
             } else {
-                entry = TodayEntry(date: Date(), rows: [], total: 0, updated: nil,
-                                   error: "Can't reach the server", armed: armed)
+                entry = TodayEntry(date: Date(), rows: [], total: 0, caps: .fallback,
+                                   updated: nil, error: "Can't reach the server", armed: armed)
             }
             // .after, not .atEnd: there is exactly one entry, and its content
             // does not expire on a schedule the way prayerlist's day rollover
@@ -622,8 +646,8 @@ struct TaskMasterProvider: TimelineProvider {
 
 // MARK: - View
 
-/// The check mark's glyph, and the square you have to hit to change it. 20 pt
-/// where the circle used to be 12 ("slightly bigger would be nice") and a 28 pt
+/// The check mark's glyph, and the square you have to hit to change it. 18 pt
+/// where the circle used to be 12 ("slightly bigger would be nice") and a 26 pt
 /// target around it, which is about a fingertip and still nowhere near the
 /// whole row — see the comment on the Toggle in rowBody().
 private let kSymbolSize: CGFloat = 18
@@ -661,8 +685,8 @@ private struct CheckToggleStyle: ToggleStyle {
                     .font(.system(size: kSymbolSize))
                     .foregroundColor(configuration.isOn ? .green : offColor)
                     .accessibilityLabel(Text(spoken))
-                    // The glyph is 20 pt; this frame is what makes the TAP
-                    // TARGET 28, and contentShape below is what makes all 28 of
+                    // The glyph is 18 pt; this frame is what makes the TAP
+                    // TARGET 26, and contentShape below is what makes all 26 of
                     // it tappable instead of just the ring itself.
                     .frame(width: kTapTarget, height: kTapTarget)
                 configuration.label
@@ -677,14 +701,21 @@ struct TaskMasterWidgetView: View {
     var entry: TodayEntry
     @Environment(\.widgetFamily) private var family
 
-    /// How many rows the family has room for. Small is the count plus a glance;
-    /// large is the whole morning.
+    /// How many rows to draw: what Settings → Widget asked for, but never more
+    /// than the family has ROOM for. The cap is a preference and kFits* is a
+    /// fact about a 170 pt box, so the smaller of the two is the only answer
+    /// that cannot overflow — asking for 20 rows on a small widget gets 3.
+    ///
+    /// With no caps in the feed both sides are kFits*, and the limit is exactly
+    /// the 3/5/12 this widget has always used.
     private var rowLimit: Int {
+        let fits: Int
         switch family {
-        case .systemSmall:  return 3
-        case .systemMedium: return 5   // 5 × 26 pt rows + header + footer fit the 170 pt medium family; 6 did not
-        default:            return 12
+        case .systemSmall:  fits = kFitsSmall
+        case .systemMedium: fits = kFitsMedium
+        default:            fits = kFitsLarge
         }
+        return min(entry.caps.cap(for: family), fits)
     }
 
     private var shown: [TodayRow] { Array(entry.rows.prefix(rowLimit)) }
@@ -708,7 +739,7 @@ struct TaskMasterWidgetView: View {
         let armed: Bool = entry.armed.contains(row.id)
 
         // .center, where this used to be .firstTextBaseline. Baseline alignment
-        // lines a 20 pt glyph's baseline up with 13 pt text, which hangs the box
+        // lines an 18 pt glyph's baseline up with 13 pt text, which hangs the box
         // high above the row's optical middle and drops the due label with it.
         // The row's height is now the tap target's, not the text's, so centring
         // the three pieces on that box is what actually lines up.
@@ -732,6 +763,21 @@ struct TaskMasterWidgetView: View {
                 .font(.system(size: 13))
                 .lineLimit(1)
                 .truncationMode(.tail)
+            // "Water the plants · work", drawn only when the server sent a
+            // category — which it does only when Settings → Widget asked for
+            // one. A separate Text rather than one interpolated string because
+            // the two halves are different sizes and colours, and because the
+            // DESCRIPTION is the half that gives way: it is the only flexible
+            // view in this row, so SwiftUI hands the fixedSize ones their ideal
+            // width and truncates it, which is the wanted order — the category
+            // is a word, and half a word says nothing.
+            if !row.category.isEmpty {
+                Text("· " + row.category)
+                    .font(.system(size: 11))
+                    .foregroundColor(.gray)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
             Spacer(minLength: 4)
             // fixedSize so a long description truncates and the due label never
             // does — the label is the point.
@@ -765,8 +811,8 @@ struct TaskMasterWidgetView: View {
                     .foregroundColor(.gray)
             } else {
                 // spacing 0 where it used to be 3: a row is now as tall as
-                // its 28 pt tap target rather than as tall as 13 pt of text,
-                // and the clear space that target leaves around the 20 pt glyph
+                // its 26 pt tap target rather than as tall as 13 pt of text,
+                // and the clear space that target leaves around the 18 pt glyph
                 // is already wider than the gap the old spacing drew.
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(shown) { row in
@@ -821,7 +867,9 @@ struct TaskMasterWidget: Widget {
             TaskMasterWidgetView(entry: entry)
         }
         .configurationDisplayName("Today")
-        .description("Overdue and due-today tasks from TaskMaster.")
+        // Deliberately vaguer than it was ("Overdue and due-today tasks"): which
+        // groups appear is a preference now, so the gallery cannot promise one.
+        .description("Your TaskMaster list, as set up in Settings → Widget.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }

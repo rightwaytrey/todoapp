@@ -101,6 +101,16 @@ class Settings:
 
         self.cors_origins = _list("TASKMASTER_CORS_ORIGINS") or ["*"]
 
+        # --- Preferences (docs/api.md round 5, docs/design.md D15) -----------
+        # One JSON document, next to the env file the systemd unit already
+        # reads. Not in Taskwarrior: none of this is task data, and a UDA per
+        # setting would put the widget's row caps in every `task export`.
+        # Not in the repo either — it is per-install state, and the repo is
+        # public (D4).
+        self.prefs_path = Path(
+            _s("TASKMASTER_PREFS") or "~/.config/taskmaster/prefs.json"
+        ).expanduser()
+
         # --- App bundle updates (docs/design.md D11, docs/api.md) -----------
         # Where scripts/publish_bundle.py writes manifest.json and the zips.
         # Gitignored, and empty until the planner says otherwise — an empty

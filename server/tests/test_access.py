@@ -126,9 +126,17 @@ async def test_writes_are_gated_too(client, monkeypatch):
     monkeypatch.setenv("TASKMASTER_TOKEN", "s3cret")
     reload_settings()
     try:
+        # The round-5 endpoints are behind the same one gate as everything
+        # else: only /health and the two app-update paths are exempt, and that
+        # exemption is a property of the plugin, not of the path (middleware.py).
         for method, path in (("post", "/api/tasks"),
                              ("delete", "/api/tasks/x"),
-                             ("get", "/api/meta")):
+                             ("get", "/api/meta"),
+                             ("get", "/api/prefs"),
+                             ("put", "/api/prefs"),
+                             ("get", "/api/widget"),
+                             ("post", "/api/categories/rename"),
+                             ("post", "/api/categories/delete")):
             r = await getattr(client, method)(path)
             assert r.status_code == 401, path
     finally:
