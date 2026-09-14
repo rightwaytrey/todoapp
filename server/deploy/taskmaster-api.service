@@ -54,7 +54,13 @@ Environment=TZ=America/Chicago
 ExecStart=%h/projects/todoapp/server/.venv/bin/uvicorn app.main:app \
     --host 0.0.0.0 --port 8101 --workers 1
 
-Restart=on-failure
+# always, not on-failure: systemd counts SIGTERM as a clean exit, so on-failure
+# never restarts after a stray kill. On 2026-09-08 a `pkill -f "app.main:app"`
+# from an unrelated project's test run matched the ExecStart above, and the API
+# stayed dead for five days with the phone showing "offline". `always` brings
+# it back after any exit except an explicit `systemctl --user stop`, which
+# systemd never follows with an automatic restart.
+Restart=always
 RestartSec=3
 
 NoNewPrivileges=true

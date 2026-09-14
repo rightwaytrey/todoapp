@@ -387,6 +387,18 @@ retag` → `/var/www/dash/todos/data.json`. Check
 the server is running as anything other than the login user it has no session
 bus and the hook's `systemctl --user` call is a no-op.
 
+**The app says "offline".** That pill means the request never got an HTTP
+answer at all — connection refused, no route, timeout — so it is not the
+allowlist (that is `forbidden`) and not the token (`unauthorized`). First:
+`systemctl --user status taskmaster-api`. `inactive (dead)` with no error is
+the signature of something outside systemd sending the process SIGTERM; on
+2026-09-08 that was a `pkill -f "app.main:app"` from another project's test
+run, which matched this unit's ExecStart, and the API stayed down for five days.
+The unit is `Restart=always` since then, so after any exit but an explicit
+`systemctl --user stop` it is back within 3 s — if it is dead now, someone
+stopped it. If it is `active` and the phone still says offline, the phone has
+no path to the box: Tailscale off, or the MagicDNS name not resolving.
+
 **The service will not start.** `journalctl --user -u taskmaster-api -n 50`.
 An `Address already in use` means something else took 8101 (8095–8100 are
 already spoken for on this box); `ss -ltnp | grep 8101` names it.

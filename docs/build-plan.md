@@ -42,7 +42,7 @@ shapes round-tripping, list/ETag/304, patch with null-clears and tag diffing
 with reserved tags ignored, done/undone/409, delete/404, annotate, the IP
 allowlist (403 for a `192.168.x` client via `client=` on the ASGI transport),
 the token gate. Deploy: `deploy/taskmaster-api.service` (user unit, port 8101,
-`Restart=on-failure`, `TZ=America/Chicago`, `EnvironmentFile=-%h/.config/taskmaster/env`)
+`Restart=always`, `TZ=America/Chicago`, `EnvironmentFile=-%h/.config/taskmaster/env`)
 and `deploy/install.sh` (venv, symlink unit, `systemctl --user daemon-reload
 && enable --now`). **Then actually install and start it** on this box and
 prove it against the real Taskwarrior: `curl localhost:8101/health`, list the
