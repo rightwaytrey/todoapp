@@ -80,15 +80,12 @@
     /* The wash a just-added row is painted with for ~1s. */
     --flash: rgba(26,99,216,.14);
     --shadow: 0 6px 24px rgba(16,21,28,.18);
-    /* Heights of the two fixed bottom bars. --qah is rewritten from JS to the
-       quick-add bar's real height (0 when it is hidden) so the list can never
-       end up underneath it. */
+    /* --tabh is the fixed tab bar's height. */
     --tabh: 58px;
-    --qah: 0px;
     /* Rewritten from JS (measureBars()) to the floating "+" button's real
-       footprint, 0 when it is hidden (Done, Settings) -- same trick as
-       --qah, and for the same reason: main's bottom padding has to clear
-       whatever is actually floating over the list, not a guessed constant. */
+       footprint, 0 when it is hidden (Done, Settings) -- so main's bottom
+       padding clears whatever is actually floating over the list, not a
+       guessed constant. */
     --fabh: 0px;
     --sab: env(safe-area-inset-bottom, 0px);
   }
@@ -139,7 +136,7 @@
   /* An author `display` rule beats the UA sheet's [hidden]{display:none} no
      matter how specific the UA rule is, so every element this file gives a
      display to would ignore el.hidden = true. That is not theoretical: the
-     quick-add bar is display:flex and the sheet is display:flex, and both of
+     floating "+" is display:flex and the sheet is display:flex, and both of
      them sat on top of the Settings screen until this line existed. Toggle
      visibility with el.hidden and let this rule mean it. */
   [hidden] { display: none !important; }
@@ -197,7 +194,7 @@
 
   /* ---- layout ---------------------------------------------------------- */
   main {
-    padding: 8px 16px calc(var(--tabh) + var(--qah) + var(--fabh) + var(--sab) + 20px);
+    padding: 8px 16px calc(var(--tabh) + var(--fabh) + var(--sab) + 20px);
   }
   h2.group {
     display: flex; align-items: baseline; gap: 8px;
@@ -422,50 +419,6 @@
   .mono { font-variant-numeric: tabular-nums; font-family: "SF Mono", ui-monospace, monospace; }
   .tiny { font-size: 12px; color: var(--dim); line-height: 1.55; }
 
-  /* ---- quick add (pinned above the tab bar) ---------------------------- */
-  /* Thumb-reachable on purpose: capture is the thing this app has to be
-     fastest at, and the top of a 6.1" screen is not where a thumb lives. */
-  .quickadd {
-    position: fixed; left: 0; right: 0; bottom: calc(var(--tabh) + var(--sab));
-    background: var(--bg); border-top: 1px solid var(--line);
-    padding: 8px 12px; z-index: 9;
-    display: flex; flex-direction: column; gap: 8px;
-  }
-  .qarow { display: flex; gap: 7px; align-items: center; }
-  /* The field is the only thing on the row allowed to lose width. Two chips and
-     Add have to fit beside it on a 390pt screen, so both chips are capped and
-     ellipsised rather than allowed to squeeze the field to nothing -- and both
-     keep .chip's 44px min-height, because the row may lose width and must never
-     lose tap target. */
-  .qarow #qaText { flex: 1 1 40px; min-width: 0; }
-  .qachip {
-    flex: none; white-space: nowrap; padding: 9px 10px; font-size: 13px;
-    max-width: 98px; overflow: hidden; text-overflow: ellipsis;
-  }
-  .qachip.set { background: var(--accent); color: var(--accent-text); border-color: transparent; }
-  /* The two chips say "set" differently ON PURPOSE. The date chip fills, as it
-     has since 1.0.3. The category chip outlines instead, because filling it too
-     puts three solid accent pills in a row -- category, date, Add -- which read
-     as one blue blob with the button that actually adds the task lost inside
-     it. Outlined, it is still obviously chosen, and Add is still the only solid
-     thing on the row. */
-  #qaCat.set {
-    background: var(--card); color: var(--accent);
-    border-color: var(--accent); font-weight: 700;
-  }
-  #qaAdd { flex: none; padding: 12px 14px; }
-  /* Add is tapped more than anything else in the app and is the one whose
-     result (a row, further up, behind the keyboard) is easiest to miss, so
-     it presses harder than an ordinary .btn. The row it makes flashes too
-     -- see .task.justadded. */
-  #qaAdd:active { transform: scale(.94); opacity: .78; }
-  #qaPickRow #qaDate { flex: 1; }
-  /* Only on screen while a project chip is selected, so the bar changes height
-     -- measureBars() has to run whenever it is toggled or the last row hides
-     underneath it. */
-  .qahint { font-size: 12px; color: var(--dim); line-height: 1.4; padding: 0 2px; }
-  .qahint b { color: var(--text); font-weight: 700; }
-
   /* ---- bottom tab bar -------------------------------------------------- */
   nav.tabs {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
@@ -550,11 +503,10 @@
   .picklist button.new { color: var(--dim); }
 
   /* ---- toast ----------------------------------------------------------- */
-  /* Sits above BOTH bottom bars, not above the tab bar alone: the Undo button
-     is useless if the quick-add covers it. */
+  /* Sits above the tab bar and the home-indicator safe area under it. */
   #toast {
     position: fixed; left: 12px; right: 12px;
-    bottom: calc(var(--tabh) + var(--qah) + var(--sab) + 10px);
+    bottom: calc(var(--tabh) + var(--sab) + 10px);
     background: var(--text); color: var(--bg); border-radius: 12px;
     padding: 11px 12px 11px 15px; font-size: 15px; line-height: 1.35; z-index: 40;
     box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px;
@@ -699,20 +651,19 @@
       transition: none !important;
     }
     .check.pop i, .task.completing, .task.justadded { animation: none !important; }
-    .check:active i, .btn:active, #qaAdd:active, .buttonpill:active {
+    .check:active i, .btn:active, .buttonpill:active {
       transform: none;
     }
   }
 
-  /* ---- floating "+" (round 7, Feature 1) -------------------------------- */
-  /* Fixed ABOVE the quick-add bar's own real height (--qah, measureBars()),
-     so it can never sit over the Add button inside that bar however tall the
-     bar gets (the date-picker row adds a whole extra line to it) -- and above
-     the tab bar and the home-indicator safe area under that. Tasks only: it
+  /* ---- floating "+" (round 7/8) ------------------------------------------ */
+  /* Fixed above the tab bar and the home-indicator safe area under it -- the
+     quick-add bar this used to clear is gone (round 8): the "+" and the
+     new-task sheet are the only way to capture a task now. Tasks only: it
      has nothing to add a task TO on Done or Settings (see show()). */
   .fab {
     position: fixed; right: 16px;
-    bottom: calc(var(--tabh) + var(--qah) + var(--sab) + 16px);
+    bottom: calc(var(--tabh) + var(--sab) + 16px);
     width: 54px; height: 54px; border-radius: 50%; z-index: 9; padding: 0;
     border: 0; background: var(--accent); color: var(--accent-text);
     box-shadow: var(--shadow); cursor: pointer;
@@ -765,8 +716,9 @@
   <div class="filterbar" id="filterbar" role="group"
        aria-label="Filter by category or tag"></div>
   <p class="hint" id="reorderHint" hidden>
-    Drag <b>&#8801;</b> to reorder. A task can only move inside its own group —
-    the group is decided by the due date, not by you.
+    Drag <b>&#8801;</b> to reorder. A task can only move inside its own
+    section — the section is the due group or the category, whichever the
+    list is grouped by, not by you.
   </p>
   <div id="groups"></div>
   <div class="empty" id="tasksEmpty" hidden></div>
@@ -818,7 +770,9 @@
     home-screen widget show what it sends (design.md D8). <b>Manual</b> adds a
     reorder handle to the Tasks screen. <b>Group by Category</b> sections the
     Tasks list by category instead of by due date — drag a section's handle to
-    reorder categories, which reorders them here and on the widget too.
+    reorder categories, which reorders them here and on the widget too. The
+    home-screen widget groups its rows the same way as this switch now, not a
+    separate one of its own.
   </p>
 
   <h2 class="group">Categories</h2>
@@ -838,8 +792,6 @@
   </p>
 
   <h2 class="group">Widget</h2>
-  <label>Group by</label>
-  <div class="seg" id="widgetGroupBy"></div>
   <label>Groups it shows</label>
   <div class="prefs" id="widgetGroups"></div>
   <label>Rows per widget size</label>
@@ -848,9 +800,8 @@
   <select id="widgetCat"></select>
   <div class="prefs" id="widgetOpts" style="margin-top:12px"></div>
   <p class="prefhint">
-    <b>Group by</b> orders the rows; <b>Category</b> puts each category under
-    its own heading and labels every row. Picked up on the widget's next
-    refresh (about 15 minutes), or when you leave the app.
+    Picked up on the widget's next refresh (about 15 minutes), or when you
+    leave the app.
   </p>
 
   <h2 class="group">This device</h2>
@@ -882,27 +833,11 @@
 
 </main>
 
-<!-- ===================== quick add ====================================== -->
-<div class="quickadd" id="quickadd" hidden>
-  <div class="qarow">
-    <input type="text" id="qaText" enterkeyhint="done" autocapitalize="sentences"
-           autocorrect="on" placeholder="Add a task" aria-label="New task">
-    <button class="chip qachip" id="qaCat" aria-label="Category for new tasks">Category</button>
-    <button class="chip qachip" id="qaDue" aria-label="Due date for the new task">No date</button>
-    <button class="btn primary" id="qaAdd">Add</button>
-  </div>
-  <div class="qahint" id="qaHint" hidden></div>
-  <div class="qarow" id="qaPickRow" hidden>
-    <input type="date" id="qaDate" aria-label="Pick a due date">
-    <button class="btn small" id="qaPickClear">Clear</button>
-  </div>
-</div>
-
-<!-- ===================== floating add (round 7, Feature 1) ============== -->
+<!-- ===================== floating add (round 7/8) ======================= -->
 <!-- Opens the detail sheet below in NEW-TASK mode (openNewTaskSheet()) --
-     quick-add stays for fast capture; this is for a task that needs the
-     fields quick-add does not have (priority, a time, tags, a repeat) without
-     a save-then-reopen round trip. Tasks tab only -- see show(). -->
+     the only way to add a task since round 8 removed the quick-add bar (it
+     was redundant with this once the sheet covered priority, a time, tags
+     and a repeat too). Tasks tab only -- see show(). -->
 <button class="fab" id="fabAdd" hidden aria-label="New task">
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
 </button>
@@ -1117,7 +1052,7 @@ const K = {
   queue: 'tm.queue',      // unsent write ops, in order
   meta: 'tm.meta',        // last GET /api/meta (projects + tags for the sheet)
   filter: 'tm.filter',    // the one selected chip: '', 'p:<project>' or 't:<tag>'
-  qaCategory: 'tm.qaCategory', // the category quick-add gives a new task
+  stickyCategory: 'tm.qaCategory', // the sticky category a new task defaults to
   prefs: 'tm.prefs',      // last GET /api/prefs (categories, chips, sort, widget)
   lastSync: 'tm.lastsync' // ISO of the last successful list
 };
@@ -1172,12 +1107,13 @@ let lastSync = lsGet(K.lastSync, '');
 // confusion this app was built to end (design.md, top).
 let filter = lsGet(K.filter, '');
 
-// The category the quick-add bar gives a new task, remembered across launches
-// (design.md D13). Like the filter it is a PREFERENCE, not a cache, so "Clear
-// local cache" deliberately leaves it alone: capture is what this app is for,
-// and coming back to it silently filing tasks somewhere else would be worse
-// than any stale list.
-let qaCategory = lsGet(K.qaCategory, '');
+// The category a new task defaults to, remembered across launches (design.md
+// D13) -- the "+" sheet's default now that round 8 removed the quick-add bar.
+// Like the filter it is a PREFERENCE, not a cache, so "Clear local cache"
+// deliberately leaves it alone: capture is what this app is for, and coming
+// back to it silently filing tasks somewhere else would be worse than any
+// stale list.
+let stickyCategory = lsGet(K.stickyCategory, '');
 
 // ---------------------------------------------------------------------------
 // preferences (docs/api.md, "Preferences") -- ONE document, on the SERVER
@@ -1198,8 +1134,11 @@ let qaCategory = lsGet(K.qaCategory, '');
 // every load.
 const SORT_MODES = ['due', 'priority', 'urgency', 'manual'];
 // How the TASKS LIST is sectioned (api.md, "List grouping by category",
-// round 7) -- independent of WIDGET_GROUP_BY below, which is the widget's own
-// separate setting.
+// round 7) -- a separate document key from WIDGET_GROUP_BY below (the
+// widget's own equivalent setting), and still validated separately, but
+// round 8 removed the Widget card's own control for it: Settings now writes
+// both from the one "Group by" switch on the Sort card, so the two values
+// cannot disagree from the glass, even though the contract keeps them apart.
 const SORT_GROUP_BY = ['due', 'category'];
 const WIDGET_GROUPS = ['overdue', 'today', 'upcoming', 'none'];
 // How the feed is ORDERED, not what is in it: `groups` still decides which
@@ -1545,23 +1484,6 @@ function chipCounts(all) {
   }
   return counts;
 }
-// prefs.chips.order, then anything in use that it has not heard of. A tag has
-// to be offered deliberately -- claude and alert always are, because they mean
-// something downstream, and any other only once it is in the order list, which
-// is what the Filters editor writes. Otherwise every tag anyone has ever put on
-// a task would turn up as a chip, which is the row of noise D9 refused.
-function chipOrder(counts) {
-  const out = prefs.chips.order.filter(v => NEVER_CHIP.indexOf(v) === -1);
-  const extra = [];
-  for (const v of Object.keys(counts || {})) {
-    if (out.indexOf(v) >= 0 || NEVER_CHIP.indexOf(v) >= 0) continue;
-    if (v.indexOf('t:') === 0 && FILTER_TAGS.indexOf(v.slice(2)) === -1) continue;
-    extra.push(v);
-  }
-  extra.sort();
-  return out.concat(extra);
-}
-
 function filterProject() { return filter.indexOf('p:') === 0 ? filter.slice(2) : ''; }
 function filterTag() { return filter.indexOf('t:') === 0 ? filter.slice(2) : ''; }
 // What to call the current filter in a sentence: a project by its name, a tag
@@ -1582,8 +1504,6 @@ function applyFilter(list) { return filter ? list.filter(matchesFilter) : list; 
 function setFilter(v) {
   filter = v || '';
   if (filter) lsSet(K.filter, filter); else lsDel(K.filter);
-  paintQaHint();
-  paintQaCat();     // the chip says what a new task gets, and the filter decides
   render();
   window.scrollTo(0, 0);
 }
@@ -1976,6 +1896,12 @@ async function putPrefs(mutate, okMsg) {
   if (prefsSaving) return false;
   const next = normPrefs(JSON.parse(JSON.stringify(prefs)));
   mutate(next);
+  // The chip row's order is DERIVED, not stored (api.md round 8) -- recomputed
+  // on every write, not just a chip-editor one, so a category drag (which
+  // never touches chips.order itself) still leaves the server's copy coherent
+  // for an older reader or the widget. Against next.categories.order so a
+  // change made by THIS SAME mutate() lands in the same PUT.
+  next.chips.order = deriveChipOrder(next.categories.order);
   prefsSaving = true;
   render();
   try {
@@ -2190,15 +2116,16 @@ let filterBarPainted = null;   // the filter the bar was last scrolled for
 let filterBarHTML = '';        // what is already in the DOM; see below
 function renderFilterBar(all) {
   const counts = chipCounts(all);
-  // The ORDER and the hiding are the user's, from Settings → Filter chips
-  // (prefs.chips). What has never been decided by anyone -- a category that
-  // turned up on a task today -- comes after the list, alphabetically.
+  // The ORDER is DERIVED (api.md round 8), not edited: categories in
+  // categories.order (then any other in-use category alphabetically), then
+  // tags alphabetically -- see deriveChipOrder(). Only the HIDING is the
+  // user's, from Settings → Filter chips (prefs.chips.hidden).
   //
-  // A chip with nothing pending in it is still left out entirely, prefs or no
-  // prefs: an empty chip is noise, and a row of them is the filter confusion
+  // A chip with nothing pending in it is still left out entirely, hidden or
+  // not: an empty chip is noise, and a row of them is the filter confusion
   // this app replaced (design.md D9).
   const chips = [['', 'All', all.length, false]];
-  for (const v of chipOrder(counts)) {
+  for (const v of deriveChipOrder()) {
     if (isHiddenChip(v) || !counts[v]) continue;
     chips.push([v, v.slice(2), counts[v], v.indexOf('t:') === 0]);
   }
@@ -2313,19 +2240,39 @@ function renderDueSections(groups, order, view) {
 // category out of the pickers and the chip row, not out of the Tasks list
 // (design.md D13: its tasks stay), so a hidden category with pending tasks
 // still gets a section, in its normal place.
-function catSectionRank(name) {
+function catSectionRank(name, order) {
   if (!name) return [2, '', ''];
-  const i = prefs.categories.order.indexOf(name);
+  const list = order || prefs.categories.order;
+  const i = list.indexOf(name);
   if (i >= 0) return [0, i, ''];
   return [1, name.toLowerCase(), name];
 }
-function byCatSection(a, b) {
-  const ra = catSectionRank(a), rb = catSectionRank(b);
+function byCatSection(a, b, order) {
+  const ra = catSectionRank(a, order), rb = catSectionRank(b, order);
   for (let i = 0; i < ra.length; i++) {
     if (ra[i] < rb[i]) return -1;
     if (ra[i] > rb[i]) return 1;
   }
   return 0;
+}
+// The chip row's order, DERIVED rather than edited (api.md round 8): category
+// chips in the same order as the Tasks list's own sections (byCatSection,
+// above), then tag chips alphabetically. Used for the filter bar
+// (renderFilterBar), the Settings "Filter chips" card (renderChipEditor) and
+// -- so the wire document stays coherent for an older reader or the widget --
+// every putPrefs() write. `order` defaults to the live prefs, but putPrefs()
+// passes the DRAFT document's categories.order instead when that is the very
+// list a write is changing, so a category drag reorders the chip row in the
+// same PUT rather than one render behind it.
+function deriveChipOrder(order) {
+  const cats = allCategories().slice().sort((a, b) => byCatSection(a, b, order));
+  const tags = [];
+  const pushTag = g => { if (tags.indexOf(g) === -1) tags.push(g); };
+  for (const g of FILTER_TAGS) pushTag(g);
+  for (const g of (meta.tags || [])) pushTag(g);
+  tags.sort();
+  return cats.map(c => 'p:' + c).concat(tags.map(g => 't:' + g))
+             .filter(v => NEVER_CHIP.indexOf(v) === -1);
 }
 // The one thing that starts a SECTION drag (startSecDrag, below). Sits inside
 // a 12px h2 rather than a 52px row, so its 44px touch target is grown with
@@ -2502,14 +2449,6 @@ function miniBtn(label, act, key, aria, opts) {
     (opts.disabled ? ' disabled' : '') +
     ' aria-label="' + esc(aria) + '">' + label + '</button>';
 }
-// ↑ / ↓ for a row at `i` of `n`. Disabled at the ends rather than absent, so
-// the buttons under one row line up with the buttons under the next.
-function moveBtns(key, i, n, what) {
-  return miniBtn('&#8593;', 'up', key, 'Move ' + what + ' up',
-                 { cls: 'arrow', disabled: i === 0 }) +
-         miniBtn('&#8595;', 'down', key, 'Move ' + what + ' down',
-                 { cls: 'arrow', disabled: i === n - 1 });
-}
 // A row that is itself a switch: the whole 52px line toggles, and the tick on
 // the right is the state. Same shape as the category picker's rows, because it
 // is the same gesture.
@@ -2537,8 +2476,10 @@ const SORT_LABELS = [['due', 'Due date'], ['priority', 'Priority first'],
                      ['urgency', 'Urgency'], ['manual', 'Manual']];
 // The "Group by" pair (api.md round 7): a SEPARATE preference from the four
 // rows above (prefs.sort.group_by, not prefs.sort.mode), in the same
-// switchRow/prefrow style and the same card rather than a segmented control
-// like the widget's own Group by -- this card already IS a list of rows.
+// switchRow/prefrow style and the same card. Round 8: this is the ONLY
+// Group-by control left in Settings -- picking one writes prefs.widget.
+// group_by to match too (see the click handler below), so the Widget card
+// does not carry a second switch that can disagree with this one.
 const GROUP_BY_LABELS = [['due', 'Due date'], ['category', 'Category']];
 function renderSortEditor() {
   const m = sortMode();
@@ -2563,8 +2504,9 @@ function catCount(name) {
 }
 // The one thing on a category row that starts a drag (see startCatDrag,
 // below). Same look as the task list's handle (.draghandle) -- placed before
-// the name rather than inside .pacts, so a sixth control does not widen the
-// already-full-width arrows/Hide/Rename/Delete cluster past a 390pt screen.
+// the name rather than inside .pacts, so it does not crowd the Hide/Rename/
+// Delete cluster on a 390pt screen (round 8 dropped the up/down arrows that
+// used to share that space -- the drag handle is the only way to reorder now).
 function catDragHandle(name) {
   return '<button class="draghandle" data-act="drag" data-key="' + esc(name) +
     '" aria-label="Reorder ' + esc(name) + '">' +
@@ -2578,7 +2520,7 @@ function renderCatEditor() {
       'No categories yet.</span></div>');
     return;
   }
-  setHTML('catEditor', names.map((name, i) => {
+  setHTML('catEditor', names.map(name => {
     const hidden = isHiddenCat(name);
     const n = catCount(name);
     const note = n + (n === 1 ? ' task' : ' tasks') + (hidden ? ' · hidden' : '');
@@ -2588,7 +2530,6 @@ function renderCatEditor() {
       '<span class="pname">' + esc(name) +
         '<span class="pnote">' + esc(note) + '</span></span>' +
       '<span class="pacts">' +
-        moveBtns(name, i, names.length, 'the ' + name + ' category') +
         miniBtn(hidden ? 'Show' : 'Hide', 'hide', name,
                 (hidden ? 'Show ' : 'Hide ') + name) +
         miniBtn('Rename', 'rename', name, 'Rename ' + name) +
@@ -2597,23 +2538,7 @@ function renderCatEditor() {
   }).join(''));
 }
 
-// The order list on the server may never have heard of a category a task
-// invented this morning, so a move writes the WHOLE list back -- the one on
-// screen, which is the one the user just rearranged.
-function moveInList(list, key, dir) {
-  const i = list.indexOf(key);
-  const j = i + dir;
-  if (i < 0 || j < 0 || j >= list.length) return list;
-  const out = list.slice();
-  out[i] = out[j]; out[j] = key;
-  return out;
-}
 function catEditorAct(act, name) {
-  if (act === 'up' || act === 'down') {
-    const next = moveInList(allCategories(), name, act === 'up' ? -1 : 1);
-    putPrefs(p => { p.categories.order = next; });
-    return;
-  }
   if (act === 'hide') {
     const hidden = isHiddenCat(name);
     putPrefs(p => {
@@ -2646,9 +2571,8 @@ function renameCategory(name) {
     if (!ok) return;
     // Anything on this phone still pointing at the old name would be pointing
     // at a category that no longer exists: an empty filter with no way back to
-    // the tasks, and a quick-add chip filing new tasks under a name nothing
-    // else uses.
-    if (qaCategory === name) setQaCategory(to);
+    // the tasks, and new tasks silently filed under a name nothing else uses.
+    if (stickyCategory === name) setStickyCategory(to);
     if (filter === 'p:' + name) setFilter('p:' + to);
     render();
   });
@@ -2672,7 +2596,7 @@ function deleteCategory(name) {
       categoryCall('/api/categories/delete', { name: name, move_to: v || null },
                    'Deleted ' + name).then(ok => {
         if (!ok) return;
-        if (qaCategory === name) setQaCategory(v || '');
+        if (stickyCategory === name) setStickyCategory(v || '');
         if (filter === 'p:' + name) setFilter(v ? 'p:' + v : '');
         render();
       });
@@ -2680,26 +2604,20 @@ function deleteCategory(name) {
   });
 }
 
-// ---- Settings → Filter chips ----------------------------------------------
-// Every chip that COULD be shown, whether or not it has anything in it today:
-// this is where a chip is turned on for the future, and a list that only
-// offered what is currently non-empty could not do that.
-function chipUniverse() {
-  const out = [];
-  const push = v => { if (NEVER_CHIP.indexOf(v) === -1 && out.indexOf(v) === -1) out.push(v); };
-  for (const v of prefs.chips.order) push(v);
-  for (const c of allCategories()) push('p:' + c);
-  for (const g of FILTER_TAGS) push('t:' + g);
-  for (const g of (meta.tags || [])) push('t:' + g);
-  return out;
-}
+// ---- Settings → Filter chips ------------------------------------------
+// Round 8: the order is DERIVED (deriveChipOrder(), the same bands as the
+// Tasks list's category sections), not edited here -- this card keeps only
+// Show/Hide. Every possible chip is still listed, whether or not it has
+// anything in it today: this is where a chip is turned on for the future,
+// and a list that only offered what is currently non-empty could not do
+// that.
 function chipLabel(v) {
   return v.indexOf('t:') === 0 ? '#' + v.slice(2) : v.slice(2);
 }
 function renderChipEditor() {
-  const list = chipUniverse();
+  const list = deriveChipOrder();
   const counts = chipCounts(project().pend);
-  setHTML('chipEditor', list.map((v, i) => {
+  setHTML('chipEditor', list.map(v => {
     const off = isHiddenChip(v);
     const n = counts[v] || 0;
     const notes = [n ? (n + ' pending') : 'nothing pending'];
@@ -2709,50 +2627,33 @@ function renderChipEditor() {
       '<span class="pname">' + esc(chipLabel(v)) +
         '<span class="pnote">' + esc(notes.join(' · ')) + '</span></span>' +
       '<span class="pacts">' +
-        moveBtns(v, i, list.length, 'the ' + chipLabel(v) + ' chip') +
         miniBtn(off ? 'Show' : 'Hide', 'hide', v,
                 (off ? 'Show ' : 'Hide ') + chipLabel(v) + ' chip') +
       '</span></div>';
   }).join(''));
 }
 function chipEditorAct(act, v) {
-  if (act === 'up' || act === 'down') {
-    const next = moveInList(chipUniverse(), v, act === 'up' ? -1 : 1);
-    putPrefs(p => { p.chips.order = next; });
+  if (act !== 'hide') return;
+  // A category hidden as a CATEGORY is what is hiding this chip; unhiding it
+  // here would leave the row saying one thing and the chip row doing
+  // another, so say where the switch actually is.
+  if (v.indexOf('p:') === 0 && isHiddenCat(v.slice(2)) &&
+      prefs.chips.hidden.indexOf(v) === -1) {
+    toast('That category is hidden — show it under Categories.', { bad: true });
     return;
   }
-  if (act === 'hide') {
-    // A category hidden as a CATEGORY is what is hiding this chip; unhiding it
-    // here would leave the row saying one thing and the chip row doing
-    // another, so say where the switch actually is.
-    if (v.indexOf('p:') === 0 && isHiddenCat(v.slice(2)) &&
-        prefs.chips.hidden.indexOf(v) === -1) {
-      toast('That category is hidden — show it under Categories.', { bad: true });
-      return;
-    }
-    const off = prefs.chips.hidden.indexOf(v) >= 0;
-    putPrefs(p => {
-      p.chips.hidden = off ? p.chips.hidden.filter(x => x !== v)
-                           : p.chips.hidden.concat([v]);
-      if (p.chips.order.indexOf(v) === -1) p.chips.order = chipUniverse();
-    });
-  }
+  const off = prefs.chips.hidden.indexOf(v) >= 0;
+  putPrefs(p => {
+    p.chips.hidden = off ? p.chips.hidden.filter(x => x !== v)
+                         : p.chips.hidden.concat([v]);
+  });
 }
 
 // ---- Settings → Widget -----------------------------------------------------
 const WIDGET_GROUP_LABELS = { overdue: 'Overdue', today: 'Today',
                               upcoming: 'Upcoming', none: 'No date' };
-const WIDGET_GROUP_BY_LABELS = { due: 'Due', category: 'Category' };
 function renderWidgetEditor() {
   const w = prefs.widget;
-  // Two exclusive choices, so a segmented control rather than two switches:
-  // there is no state with both off and none with both on, and the sort
-  // editor's switch list would offer one.
-  setHTML('widgetGroupBy', WIDGET_GROUP_BY.map(g =>
-    '<button data-gb="' + g + '"' + (g === w.group_by ? ' class="on"' : '') +
-    ' aria-pressed="' + (g === w.group_by ? 'true' : 'false') + '">' +
-    esc(WIDGET_GROUP_BY_LABELS[g]) + '</button>').join(''));
-
   const rows = WIDGET_GROUPS.map(g =>
     switchRow(w.groups.indexOf(g) >= 0, WIDGET_GROUP_LABELS[g],
               'data-g="' + g + '"', ''));
@@ -2809,13 +2710,10 @@ function widgetRowsAct(fam, act) {
   });
 }
 
-// The two fixed bars are the only things between the list and the bottom of
-// the screen, and the quick-add one changes height when the date picker row
-// opens. Measure rather than guess, or the last row hides under it.
+// The floating "+" is the only thing between the list and the bottom of the
+// screen whose footprint is not a fixed constant. Measure rather than guess,
+// or the last row hides under it.
 function measureBars() {
-  const qa = $('quickadd');
-  const h = qa.hidden ? 0 : qa.offsetHeight;
-  document.documentElement.style.setProperty('--qah', h + 'px');
   const fab = $('fabAdd');
   const fh = fab.hidden ? 0 : fab.offsetHeight + 16;   // + its own clearance
   document.documentElement.style.setProperty('--fabh', fh + 'px');
@@ -3320,8 +3218,9 @@ function endCatDrag() {
   document.body.classList.remove('dragging');
   const after = catRowIds(d.list);
   if (after.join() === d.before.join()) { render(); return; }  // no move -> no write
-  // Exactly what the arrows write (see the comment above moveInList): the
-  // WHOLE list, including any category the server has not heard of yet.
+  // The WHOLE list, including any category the server has not heard of yet --
+  // the drag handle is the only way to reorder now (round 8 dropped the
+  // up/down arrows), but it still writes exactly what they used to.
   putPrefs(p => { p.categories.order = after; });
 }
 
@@ -3435,12 +3334,9 @@ function commitSectionOrder(after) {
   putPrefs(p => { p.categories.order = next; });
 }
 
-// ---- quick add ------------------------------------------------------------
-// A tap on Add is answered three ways: the button presses (#qaAdd:active), the
-// field clears, and the row that appears is washed with --flash for ~0.9 s so
-// the eye is told WHERE it went. That last one matters most on this screen --
-// the new row is somewhere up the list, above the keyboard, and "did that
-// work?" is otherwise answered by hunting for it.
+// A row that has just been added is washed with --flash for ~0.9 s so the eye
+// is told WHERE it went: the new row is somewhere up the list, above the
+// keyboard, and "did that work?" is otherwise answered by hunting for it.
 //
 // No render is forced to take the class off again: the animation is over long
 // before the next render, and forcing one would restart it.
@@ -3452,54 +3348,16 @@ function flashRow(uuid) {
   flashTimer = setTimeout(() => { flashUuid = ''; flashTimer = null; }, 1000);
 }
 
-// The chip cycles rather than opening a menu: four states, one thumb, no modal
-// between the user and having typed the thing down.
-const DUE_STATES = ['none', 'today', 'tomorrow', 'pick'];
-let qaDueState = 'none';
-let qaPickedDate = '';
-
-function qaDueValue() {
-  if (qaDueState === 'today') return todayStr(0);
-  if (qaDueState === 'tomorrow') return todayStr(1);
-  if (qaDueState === 'pick') return qaPickedDate || null;
-  return null;
-}
-function paintQaDue() {
-  const chip = $('qaDue');
-  let label = 'No date';
-  if (qaDueState === 'today') label = 'Today';
-  else if (qaDueState === 'tomorrow') label = 'Tomorrow';
-  else if (qaDueState === 'pick') label = qaPickedDate ? fmtDay(qaPickedDate, false) : 'Pick date';
-  chip.textContent = label;
-  chip.className = 'chip qachip' + (qaDueValue() ? ' set' : '');
-  $('qaPickRow').hidden = qaDueState !== 'pick';
-  measureBars();
-}
-function cycleQaDue() {
-  const i = DUE_STATES.indexOf(qaDueState);
-  qaDueState = DUE_STATES[(i + 1) % DUE_STATES.length];
-  if (qaDueState !== 'pick') qaPickedDate = '';
-  paintQaDue();
-  if (qaDueState === 'pick') {
-    const d = $('qaDate');
-    d.value = qaPickedDate || todayStr(0);
-    qaPickedDate = d.value;
-    paintQaDue();
-    // showPicker() is the nice path on iOS 16+/Chrome; where it is missing the
-    // input is visible anyway, which is why the row exists rather than a
-    // hidden input.
-    try { if (d.showPicker) d.showPicker(); else d.focus(); } catch (e) { d.focus(); }
-  }
-}
-
 // ---- categories (design.md D13) -------------------------------------------
 // A "category" is Taskwarrior's `project`, and it stays `project` in the model,
 // in the API and in every identifier here. The word changes at the glass only,
 // because "category" is what the user asked for and what the thing is: one
 // name, chosen from a list, that says where a task belongs.
 //
-// ONE list, built here, used by both places that offer it -- the quick-add chip
-// and the detail sheet -- so the two can never present different sets. Order is
+// ONE list, built here, used by every place that offers it -- the detail
+// sheet's Category field (editing a task and the "+" sheet's New task mode
+// share the one <select>) and the "move its tasks to" picker when a category
+// is deleted -- so they can never present different sets. Order is
 // /api/meta's (the five `pa` categories first, in pa's order, then every other
 // one the server has seen: docs/api.md), then anything a task on this phone is
 // using that the server has not heard of yet, which is what an offline-added
@@ -3534,9 +3392,9 @@ function allCategories() {
 function categoryList(extra) {
   const out = [];
   const v = project();
-  // Hidden means "not offered": it is gone from this picker, gone from the
-  // quick-add chip and gone from the chip row -- but every task in it is still
-  // in the list, because hiding a category is not filing its tasks away.
+  // Hidden means "not offered": it is gone from this picker and gone from
+  // the chip row -- but every task in it is still in the list, because
+  // hiding a category is not filing its tasks away.
   for (const p of allCategories()) if (!isHiddenCat(p)) out.push(p);
   const local = [];
   for (const t of v.pend.concat(v.done)) {
@@ -3554,41 +3412,13 @@ function categoryList(extra) {
 // What a new task will ACTUALLY get. A project filter chip wins over the sticky
 // choice, and has since D9: adding a task inside a filter and having it vanish
 // from the list you are looking at is indistinguishable from a bug.
-function qaCategoryValue() { return filterProject() || qaCategory; }
+function stickyCategoryValue() { return filterProject() || stickyCategory; }
 
-function paintQaCat() {
-  const chip = $('qaCat');
-  const v = qaCategoryValue();
-  chip.textContent = v || 'Category';
-  chip.className = 'chip qachip' + (v ? ' set' : '');
-  chip.setAttribute('aria-label', v
-    ? 'Category for new tasks: ' + v + '. Tap to change.'
-    : 'No category for new tasks. Tap to choose one.');
-  measureBars();
-}
-
-// The hint under the input, on screen only while a category filter is selected:
-// it is the one time the chip above is not simply the user's own last choice,
-// and saying so is cheaper than letting them wonder why it moved.
-function paintQaHint() {
-  const el = $('qaHint');
-  const p = filterProject();
-  if (p) {
-    el.innerHTML = 'New tasks get the <b>' + esc(p) + '</b> category while that filter is on';
-    el.hidden = false;
-  } else {
-    el.textContent = '';
-    el.hidden = true;
-  }
-  measureBars();
-}
-
-// ONE picker sheet, used by everything that has to choose a category: the
-// quick-add chip, and "where do this category's tasks go?" when one is
-// deleted. A second sheet that looked the same and behaved slightly
-// differently is how two lists of categories start disagreeing (design.md
-// D13), so there is one, and the caller supplies the rows and what a tap
-// means.
+// A generic picker sheet: the caller supplies the rows and what a tap means,
+// so a future "choose one of these" does not grow its own sheet. Today the
+// only caller is deleteCategory()'s "where do this category's tasks go?" --
+// it used to also be the quick-add chip's own category picker, before round 8
+// removed the quick-add bar in favour of the "+" sheet's <select>.
 //   rows: [value, label, extraClass?]
 let pickHandler = null;
 function openPick(opts) {
@@ -3613,81 +3443,16 @@ function openPick(opts) {
 }
 function closeCatPicker() { $('catSheet').hidden = true; pickHandler = null; }
 
-function openCatPicker() {
-  const cur = qaCategoryValue();
-  openPick({
-    title: 'Category',
-    hint: filterProject()
-      ? 'The ' + filterProject() + ' filter is choosing this. Picking another moves the filter too.'
-      : 'Every new task gets this until you change it.',
-    current: cur,
-    rows: [['', 'None']].concat(categoryList(cur).map(c => [c, c]))
-            .concat([['__new__', 'New category…', 'new']]),
-    onPick: chooseCategory
-  });
-}
-
-function chooseCategory(v) {
-  if (v === '__new__') { newCategory(); return; }
-  setQaCategory(v);
-  closeCatPicker();
-}
-function newCategory() {
-  const raw = window.prompt('New category name');
-  if (raw === null) return;                       // cancelled, not empty
-  const name = String(raw).trim();
-  if (!CAT_RE.test(name)) { toast(CAT_RULE, { bad: true }); return; }
-  // Lower-cased so "Work" typed here and the `work` that pa writes are one
-  // category and not two chips that look the same.
-  setQaCategory(name.toLowerCase());
-  closeCatPicker();
-}
-
 // Picking a category while a CATEGORY filter is on moves the filter with it.
 // The filter decides what a new task gets, so leaving the two disagreeing would
 // mean a chip that says one thing and a task that does another -- the exact
 // filter confusion this app was built to end (design.md, top). A tag filter is
 // untouched: it does not decide the category, so there is nothing to reconcile.
-function setQaCategory(v) {
-  qaCategory = v || '';
-  if (qaCategory) lsSet(K.qaCategory, qaCategory); else lsDel(K.qaCategory);
+function setStickyCategory(v) {
+  stickyCategory = v || '';
+  if (stickyCategory) lsSet(K.stickyCategory, stickyCategory); else lsDel(K.stickyCategory);
   const f = filterProject();
-  if (f && f !== qaCategory) {
-    setFilter(qaCategory ? 'p:' + qaCategory : '');   // repaints both chips
-    return;
-  }
-  paintQaCat();
-  paintQaHint();
-}
-
-function quickAdd() {
-  const input = $('qaText');
-  const text = input.value.trim();
-  if (!text) { input.focus(); return; }
-  const due = qaDueValue();
-  const proj = qaCategoryValue();   // the chip's value; a filter overrides it
-  const uuid = tmpId();
-  const body = { description: text };
-  if (due) body.due = due;
-  if (proj) body.project = proj;
-
-  // The row the user sees until the server answers. It is a complete Task
-  // shape so every renderer works on it without special cases.
-  const task = {
-    uuid: uuid, description: text, status: 'pending', project: proj || null,
-    priority: null, due: due, due_at: null, tags: [], annotations: [],
-    recur: null, parent: null, depends: [], blocked: false, urgency: 5,
-    entry: new Date().toISOString(), modified: new Date().toISOString(), end: null
-  };
-  // Before the enqueue, because enqueue() is what renders the new row.
-  flashRow(uuid);
-  enqueue({ kind: 'add', uuid: uuid, body: body, task: task });
-
-  input.value = '';
-  // Deliberately does NOT reset the due chip: entering three things all due
-  // today should not mean tapping the chip three times. The text clears, the
-  // date stays, focus stays.
-  input.focus();
+  if (f && f !== stickyCategory) setFilter(stickyCategory ? 'p:' + stickyCategory : '');
 }
 
 // ---- detail sheet ---------------------------------------------------------
@@ -3719,8 +3484,9 @@ function openSheet(uuid) {
   $('shNotesBlock').hidden = false;
   $('shSave').textContent = 'Save';
 
-  // The same list the quick-add chip offers, including this task's own category
-  // when it is the only thing using it -- see categoryList().
+  // The same list the "+" sheet offers (openNewTaskSheet(), below), including
+  // this task's own category when it is the only thing using it -- see
+  // categoryList().
   $('shProject').innerHTML =
     '<option value="">— none —</option>' +
     categoryList(t.project).map(p => '<option value="' + esc(p) + '"' +
@@ -3771,11 +3537,11 @@ function openNewTaskSheet() {
   $('shTitle').textContent = 'New task';
   $('shDesc').value = '';
 
-  // Preselected to the quick-add bar's sticky category, or the active
-  // category filter when one is on (design.md D13, qaCategoryValue()) -- the
-  // same rule quickAdd() itself uses, so the "+" button and the quick-add bar
-  // never disagree about where an untouched new task would land.
-  const cat = qaCategoryValue();
+  // Preselected to the sticky category, or the active category filter when
+  // one is on (design.md D13, stickyCategoryValue()) -- the same value a
+  // successful save without a filter feeds right back into (sheetSaveNew(),
+  // round 8), so the "+" keeps defaulting to wherever the last task landed.
+  const cat = stickyCategoryValue();
   $('shProject').innerHTML =
     '<option value="">— none —</option>' +
     categoryList(cat).map(p => '<option value="' + esc(p) + '"' +
@@ -3877,9 +3643,10 @@ function sheetSave() {
 
   let project = $('shProject').value;
   if (project === '__new__') {
-    // Same rule and same lower-casing as the quick-add picker: one typed here
-    // and one picked there have to be the SAME category, not two chips that
-    // look alike, and neither may be an op the server drops with a 422.
+    // Same rule and same lower-casing as the other place a category gets
+    // typed (sheetSaveNew(), for a brand new task): one category, not two
+    // chips that look alike, and neither may be an op the server drops with
+    // a 422.
     const typed = $('shNewProject').value.trim();
     if (typed && !CAT_RE.test(typed)) { toast(CAT_RULE, { bad: true }); return; }
     project = typed.toLowerCase();
@@ -3934,12 +3701,13 @@ function sheetSave() {
   toast('Saved');
 }
 
-// sheetSave()'s NEW-TASK branch (round 7). Validated exactly the same way --
+// sheetSave()'s NEW-TASK branch (round 7; the only way to add a task since
+// round 8 removed the quick-add bar). Validated exactly the same way --
 // description required, CAT_RE + lower-casing for a typed category, a repeat
-// needs a due date, a custom repeat must match RECUR_RE -- then created
-// through the SAME path quickAdd() uses: a queued `add` with a tmp-… uuid and
-// an optimistic row (design.md D6), sent with the Create fields the contract
-// allows (api.md, "Create") -- description, project, priority, due, tags.
+// needs a due date, a custom repeat must match RECUR_RE -- then created with
+// a queued `add` and a tmp-… uuid, an optimistic row (design.md D6), sent
+// with the Create fields the contract allows (api.md, "Create") --
+// description, project, priority, due, tags.
 //
 // Repeat is not a Create field, so a chosen one is a `patch {recur}` enqueued
 // right behind the add, against the SAME tmp uuid. That is safe already, not
@@ -3970,14 +3738,20 @@ function sheetSaveNew() {
 
   let project = $('shProject').value;
   if (project === '__new__') {
-    // Same rule and same lower-casing as every other category entry point
-    // (quick-add's picker, the edit sheet) -- one category, not two chips
-    // that look alike, and never an op the server drops with a 422.
+    // Same rule and same lower-casing as the edit sheet (sheetSave()): one
+    // category, not two chips that look alike, and never an op the server
+    // drops with a 422.
     const typed = $('shNewProject').value.trim();
     if (typed && !CAT_RE.test(typed)) { toast(CAT_RULE, { bad: true }); return; }
     project = typed.toLowerCase();
   }
   project = project || null;
+  // A category chosen here becomes the STICKY default for the next new task
+  // -- what quick-add used to leave behind -- but only while no category
+  // filter is already choosing it (design.md D13: the filter wins outright
+  // while it is on, so a task added under one must not silently change what
+  // an unfiltered "+" defaults to next).
+  if (project && !filterProject()) setStickyCategory(project);
 
   const priority = shPriority || null;
   const due = joinDue($('shDate').value || '', $('shTime').value || '');
@@ -3996,9 +3770,8 @@ function sheetSaveNew() {
   if (due) body.due = due;
   if (shTags.length) body.tags = shTags.slice();
 
-  // The row the user sees until the server answers -- a complete Task shape,
-  // exactly like quickAdd()'s, so every renderer works on it without a
-  // special case for "not sent yet".
+  // The row the user sees until the server answers -- a complete Task shape
+  // so every renderer works on it without a special case for "not sent yet".
   const task = {
     uuid: uuid, description: desc, status: 'pending', project: project,
     priority: priority, due: due, due_at: null, tags: shTags.slice(),
@@ -4029,7 +3802,6 @@ function go(hash) {
 function show(name) {
   current = name;
   SCREENS.forEach(s => { $('scr-' + s).hidden = (s !== name); });
-  $('quickadd').hidden = (name !== 'tasks');
   $('fabAdd').hidden = (name !== 'tasks');
   $('tabTasks').className = name === 'tasks' ? 'on' : '';
   $('tabDone').className = name === 'done' ? 'on' : '';
@@ -4194,9 +3966,6 @@ $('filterbar').addEventListener('click', ev => {
 $('btnRefresh').addEventListener('click', () => syncNow(false));
 $('statusPill').addEventListener('click', () => syncNow(false));
 
-$('qaAdd').addEventListener('click', quickAdd);
-$('qaDue').addEventListener('click', cycleQaDue);
-$('qaCat').addEventListener('click', openCatPicker);
 $('catClose').addEventListener('click', closeCatPicker);
 $('catSheet').addEventListener('click', ev => {
   if (ev.target === $('catSheet')) closeCatPicker();   // the backdrop
@@ -4204,15 +3973,6 @@ $('catSheet').addEventListener('click', ev => {
 $('catList').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-cat]');
   if (b && pickHandler) pickHandler(b.getAttribute('data-cat'));
-});
-$('qaDate').addEventListener('change', function () { qaPickedDate = this.value; paintQaDue(); });
-$('qaPickClear').addEventListener('click', () => {
-  qaPickedDate = ''; qaDueState = 'none'; paintQaDue();
-});
-$('qaText').addEventListener('keydown', ev => {
-  // Return adds and keeps the field focused, so several tasks can go in
-  // without the keyboard ever closing.
-  if (ev.key === 'Enter') { ev.preventDefault(); quickAdd(); }
 });
 $('fabAdd').addEventListener('click', openNewTaskSheet);
 
@@ -4359,10 +4119,14 @@ $('sortEditor').addEventListener('click', ev => {
   if (g) {
     const gb = g.getAttribute('data-groupby');
     if (gb === prefs.sort.group_by) return;
-    // Purely how THIS SCREEN sections the same list (api.md round 7) -- the
-    // server's own order is untouched, so unlike sort.mode above this needs
-    // no etag bust or refetch, just a re-render.
-    putPrefs(p => { p.sort.group_by = gb; });
+    // The ONLY Group-by control now (round 8): it writes BOTH keys the
+    // contract still keeps separate -- prefs.sort.group_by (how THIS SCREEN
+    // sections the list) and prefs.widget.group_by (api.md round 6, the
+    // home-screen widget's own copy) -- so the two can never again show
+    // different switches disagreeing about one choice. Neither write touches
+    // the server's own task order, so unlike sort.mode above this needs no
+    // etag bust or refetch, just a re-render.
+    putPrefs(p => { p.sort.group_by = gb; p.widget.group_by = gb; });
   }
 });
 $('catEditor').addEventListener('click', ev => {
@@ -4372,15 +4136,6 @@ $('catEditor').addEventListener('click', ev => {
 $('chipEditor').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]');
   if (b) chipEditorAct(b.getAttribute('data-act'), b.getAttribute('data-key'));
-});
-$('widgetGroupBy').addEventListener('click', ev => {
-  const b = ev.target.closest('button[data-gb]');
-  if (!b) return;
-  const v = b.getAttribute('data-gb');
-  // Tapping the segment that is already on is not a change; a PUT for it would
-  // spend the one in-flight slot saying nothing.
-  if (v === prefs.widget.group_by) return;
-  putPrefs(p => { p.widget.group_by = v; });
 });
 $('widgetGroups').addEventListener('click', ev => {
   const sw = ev.target.closest('button[data-g]');
@@ -4470,15 +4225,6 @@ function openedFromWidget(why) {
   syncNow(true);
 }
 
-// Puts the keyboard in the quick-add field. Split out of handleDeepLink
-// because it has to run after #quickadd is actually unhidden -- see there.
-function focusQuickAdd() {
-  const el = $('qaText');
-  if (!el) return;
-  el.focus();
-  try { el.select(); } catch (e) { /* nothing typed yet to select */ }
-}
-
 // The one place a taskmaster:// URL becomes a screen. Top-level and safe to
 // call with any string, so it can be driven from a browser console
 // (handleDeepLink('taskmaster://add')) for testing, and so wireNativeHooks()
@@ -4489,20 +4235,22 @@ function handleDeepLink(url) {
   if (url.indexOf('taskmaster://') !== 0) return;   // not ours
   const parts = url.slice('taskmaster://'.length).split('/').filter(Boolean);
 
-  // taskmaster://add -- the widget's + button. Same landing as a plain tap,
-  // then the keyboard.
+  // taskmaster://add -- the widget's + button (and the app's own "+", D17).
+  // Lands on the Tasks tab and opens the same new-task sheet the floating
+  // "+" does (round 8: this used to focus the quick-add field, which is gone).
   if (parts.length === 1 && parts[0] === 'add') {
     openedFromWidget(url);
     if (current === 'tasks') {
-      focusQuickAdd();
+      openNewTaskSheet();
     } else {
-      // go() above may have just changed location.hash; if so #quickadd
-      // stays hidden until the 'hashchange' it causes runs route(), which is
-      // a separate task from this one -- not something already done by the
+      // go() above may have just changed location.hash; if so this has to
+      // wait for the 'hashchange' it causes to run route(), which is a
+      // separate task from this one -- not something already done by the
       // time openedFromWidget() returns. route()'s own listener was added at
-      // load time, long before this one, so it always runs first and unhides
-      // #quickadd before this fires.
-      window.addEventListener('hashchange', focusQuickAdd, { once: true });
+      // load time, long before this one, so it always runs first -- and
+      // route()'s 'tasks' case would otherwise close a sheet opened here as
+      // sheetIsNew right back out from under it.
+      window.addEventListener('hashchange', openNewTaskSheet, { once: true });
     }
     return;
   }
@@ -4667,9 +4415,6 @@ function boot() {
 
   fillSettings();
   paintBuildInfo();
-  paintQaHint();
-  paintQaCat();
-  paintQaDue();
   wireNativeHooks();
   if (!location.hash) location.hash = '#/tasks';
   // Cache first, network second: the list is on screen before anything is

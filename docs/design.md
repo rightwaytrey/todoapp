@@ -210,6 +210,15 @@ completing such a task triggers something downstream, and a plain checkbox got
 tapped by accident on 2026-09-04. The `button` tag is not offered as a filter
 chip: it marks how a row behaves, not a slice of the list worth filtering to.
 
+*2026-09-14:* the row's **order is derived, not edited** — the category chips
+in `categories.order` (then in-use categories not in that list,
+alphabetically), then the tag chips alphabetically. Settings → Filter chips
+only shows and hides. There used to be ↑/↓ arrows for the chips as well as
+for the categories, and once the Tasks list's sections could be dragged that
+was three controls for one order; the user: "way too many redundant order
+switchers". `prefs.chips.order` is still written, as the derived list, so the
+document stays coherent for older readers.
+
 ## D10 — Complete from the widget
 
 *Added 2026-09-04.* The row's circle on the widget is an iOS 17 interactive
@@ -354,10 +363,15 @@ one category and not two chips that look alike. A name that fails is refused
 here with a toast rather than becoming a queued op the server drops with a 422
 half a minute later.
 
-**The quick-add choice is sticky**, persisted as `tm.qaCategory`. Capture is a
+**The capture category is sticky**, persisted as `tm.qaCategory`. Capture is a
 burst activity — three things for work, then two for the house — and re-choosing
 per task would be the tax that stops the thing being used. Like the filter it is
 a *preference*, not a cache, so "Clear local cache" deliberately leaves it alone.
+*2026-09-14:* the quick-add bar this was built for is gone ("get rid of the
+add task bar, that was what the plus button was for"); the + sheet (D17) is
+now the one capture path, its category defaults to the sticky value, and
+adding with a category updates it. The key name stays so the value survives
+the update.
 
 **A category filter chip still wins over it** (D9): adding a task inside a filter
 and having it vanish from the list you are looking at is indistinguishable from a
@@ -524,8 +538,9 @@ and time, repeat, tags. Save creates through the same queued `add` op as
 quick-add (D6), so it is optimistic and works offline; a repeat is not a
 Create field (api.md), so it is queued as a `patch` behind the add and
 `rewriteId()` carries it to the real uuid. Notes are hidden until the task
-exists. The quick-add bar stays: it is still the fastest capture; the + is
-for the task that needs more than a line.
+exists. ~~The quick-add bar stays: it is still the fastest capture; the + is
+for the task that needs more than a line.~~ *Same day:* the bar is removed at
+the user's request — the + was meant to replace it, not join it (D13).
 
 **Category sections.** `prefs.sort.group_by` (api.md round 7): `"due"` — the
 D2 sections, unchanged — or `"category"`: one section per category with a
@@ -542,15 +557,56 @@ section: the midpoint is taken between the row's neighbours there, and
 **Why a preference and not a mode switch on the screen:** the choice is a
 way of reading the list, not a filter (D9), and it belongs with the sort mode
 it modifies — the same Settings card. It lives on the server because the
-order it produces is the one the widget draws (D15). **Ruled out:** grouping
-the widget by the same switch (it has its own `widget.group_by`, and the
-home screen and the phone can reasonably want different readings); category
+order it produces is the one the widget draws (D15). **Ruled out:** category
 sections inside the due groups (two levels of header on a 6.1" screen, and
 nothing left to drag); dragging categories on the widget (WidgetKit has no
 drag).
 
+*Same day, "way too many redundant order switchers":* the first cut kept the
+widget's own Group by beside the list's, which put two identical switches on
+one Settings page. Now there is **one Group by**, under Sort, and it writes
+both `sort.group_by` and `widget.group_by` — the two keys stay in the contract
+(an older client or `$EDITOR` can still set them apart), the phone just never
+offers them apart. The same pass removed the ↑/↓ arrows from Settings →
+Categories (the drag handle stays, and the list's sections drag) and from
+Settings → Filter chips (D9).
+
 Client and server change; no native change, so it ships as a bundle (D11)
 plus `systemctl --user restart`.
+
+## D18 — Category chips on the widget
+
+*Added 2026-09-14, from "how about filters for categories for the widget
+too" → "chips on the widget".*
+
+The medium and large widget draw a row of chips under the header — **All**,
+then the categories — and a tap narrows the widget to that category. It is
+the app's chip row (D9) on the home screen, and it costs one task row.
+
+**The filter is the existing preference.** A chip tap sets
+`prefs.widget.category` (D15) through a dedicated call,
+`POST /api/widget/category` (api.md round 8): one intent, one request, and
+nothing else in the document touched. The feed then carries the chip list
+(`categories`, non-hidden, in the user's order, the active one always
+included) and the active value (`category`), so the widget draws the lit
+chip from the same response it draws the rows from — no second request, and
+Settings → Widget → Category shows the same value the chips set. Nothing
+about which rows appear is decided in Swift (D14): the server applies the
+filter as it always has.
+
+**Why not GET + PUT of the prefs document from Swift:** the extension is the
+one client most likely to be built against an older contract, and D15 drops
+unknown keys on a whole-document PUT — the widget would silently erase a
+setting the phone had just made.
+
+**Why not one widget per category** (`Edit Widget`, an App Intents
+configuration): it was offered and not chosen; the chips reach the same
+place in one tap without leaving the home screen, and D15's argument against
+configuration intents still stands. It stays possible later.
+
+**Small has no chips**: it fits three rows and one glance. Chips that do not
+fit are dropped from the end, never the active one. Widget change → a build
+on the VM runner; the server half is a restart.
 
 ## Out of scope for v1 (build together later)
 

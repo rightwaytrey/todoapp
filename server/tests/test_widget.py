@@ -46,12 +46,16 @@ async def test_shape_and_caps(client):
     await make(client, "due now", due=day(-1))
     body = await feed(client)
 
-    assert set(body) == {"updated", "total", "group_by", "caps", "rows"}
+    assert set(body) == {"updated", "total", "group_by", "category",
+                         "categories", "caps", "rows"}
     assert body["updated"].endswith(("-05:00", "-06:00"))
     assert body["total"] == 1
     # Round 6: echoed so the widget knows whether to draw category headers,
     # without a second request for the prefs document.
     assert body["group_by"] == "due"
+    # Round 8: no filter yet, and the picker is the prefs default order.
+    assert body["category"] is None
+    assert body["categories"] == ["personal", "work", "claude", "fun", "inbox"]
     # `caps`, NOT `rows` — `rows` is the array. The widget truncates to
     # caps.small / caps.medium for the smaller families.
     assert body["caps"] == {"small": 3, "medium": 5, "large": 12}
@@ -205,11 +209,13 @@ async def test_recurring_templates_never_reach_the_widget(client):
 # group_by — "due" (round 5) or "category" (round 6)
 # --------------------------------------------------------------------------- #
 async def test_due_mode_is_byte_for_byte_what_round_5_sent(client):
-    """The whole of round 6 on a "due" feed is the one new `group_by` key.
+    """Round 5's feed, plus round 6's `group_by`, plus round 8's `category` /
+    `categories` — nothing else.
 
     Pinned as JSON TEXT and not as a dict: a reordered key, a stray field, or a
-    `category` that has quietly started filling itself in has to fail here, in
-    the server's own suite, rather than on a home screen after a store build.
+    row `category` that has quietly started filling itself in has to fail
+    here, in the server's own suite, rather than on a home screen after a
+    store build.
     """
     late = await make(client, "work thing", project="work", due=day(-1))
     clocked = await make(client, "loose", due="%sT23:58" % day(0))
@@ -220,6 +226,11 @@ async def test_due_mode_is_byte_for_byte_what_round_5_sent(client):
     assert body.pop("updated")                    # the server's clock; it moves
     assert json.dumps(body) == json.dumps({
         "total": 3,
+        # Round 8: no filter set, and the picker is still the prefs default —
+        # "work" and "personal" are both already in it, so neither task's own
+        # project adds anything after it.
+        "category": None,
+        "categories": ["personal", "work", "claude", "fun", "inbox"],
         "caps": {"small": 3, "medium": 5, "large": 12},
         "rows": [
             {"uuid": late["uuid"], "text": "work thing", "due": "overdue",
@@ -329,6 +340,79 @@ async def test_switching_back_to_due_restores_the_round_5_feed(client):
     assert body["group_by"] == "due"
     assert [r["text"] for r in body["rows"]] == ["personal late", "work today"]
     assert [r["category"] for r in body["rows"]] == ["", ""]
+
+
+# --------------------------------------------------------------------------- #
+# Category chips — GET carries them, POST /api/widget/category sets the
+# filter (docs/api.md round 8)
+# --------------------------------------------------------------------------- #
+async def test_a_hidden_category_is_not_listed_unless_active(client):
+    await make(client, "w", project="work")
+
+    await put_prefs(client, categories={"hidden": ["work"]})
+    assert "work" not in (await feed(client))["categories"]
+
+    await put_prefs(client, categories={"hidden": ["work"]},
+                    widget={"category": "work"})
+    body = await feed(client)
+    assert body["category"] == "work"
+    assert "work" in body["categories"]
+
+
+async def test_an_in_use_category_not_in_order_is_appended_alphabetically(client):
+    for project in ("zeta", "alpha", "Beta", "work"):
+        await make(client, project, project=project)
+
+    await put_prefs(client, categories={"order": ["work"]})
+    assert (await feed(client))["categories"] == [
+        "work",                     # the one arranged category
+        "alpha", "Beta", "zeta",    # the rest, alphabetical, case-folded
+    ]
+
+
+async def test_a_category_in_order_with_no_pending_task_is_still_listed(client):
+    await put_prefs(client, categories={"order": ["ghost"]})
+    assert (await feed(client))["categories"] == ["ghost"]
+
+
+async def test_post_category_narrows_the_feed_and_echoes_it(client):
+    """Same fixture as test_a_category_filter_narrows_the_feed, but set through
+    the dedicated intent rather than a PUT of the whole prefs document."""
+    await make(client, "work thing", project="work", due=day(-1))
+    await make(client, "home thing", project="personal", due=day(-1))
+
+    before = (await client.get("/api/prefs")).json()
+    r = await client.post("/api/widget/category", json={"category": "work"})
+    assert r.status_code == 204
+
+    body = await feed(client)
+    assert body["category"] == "work"
+    assert [row["text"] for row in body["rows"]] == ["work thing"]
+
+    # Nothing else in the document moved.
+    after = (await client.get("/api/prefs")).json()
+    assert after == {**before, "widget": {**before["widget"], "category": "work"}}
+
+
+async def test_post_category_null_clears_the_filter(client):
+    await make(client, "work thing", project="work", due=day(-1))
+    await make(client, "home thing", project="personal", due=day(-1))
+    await client.post("/api/widget/category", json={"category": "work"})
+
+    r = await client.post("/api/widget/category", json={"category": None})
+    assert r.status_code == 204
+    body = await feed(client)
+    assert body["category"] is None
+    assert body["total"] == 2
+
+
+async def test_post_category_rejects_a_bad_value(client):
+    for bad in ("bad name!", 5):
+        r = await client.post("/api/widget/category", json={"category": bad})
+        assert r.status_code == 422, r.text
+        out = r.json()
+        assert out["error"] == "invalid_request"
+        assert out["detail"].startswith("category"), out["detail"]
 
 
 # --------------------------------------------------------------------------- #

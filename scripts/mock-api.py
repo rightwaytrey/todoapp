@@ -564,6 +564,28 @@ def widget_cat_rank(name, order):
     return (1, (name.lower(), name))
 
 
+def widget_categories(active):
+    """The category CHIPS to offer (api.md round 8): prefs.categories.order
+    minus hidden, then any other in-use category alphabetically (case-folded,
+    raw name tiebreak -- widget_cat_rank()'s bands), hidden ones excluded
+    there too. The active category (already chosen, `active`) is always
+    included even if hidden or has no pending task of its own, so a chip that
+    is lit can always be seen and un-lit, and a chip never reshuffles out from
+    under a completed list."""
+    with LOCK:
+        order = list(PREFS["categories"]["order"])
+        hidden = set(PREFS["categories"]["hidden"])
+        in_use = {t["project"] for t in TASKS.values()
+                  if t["project"] and t["status"] == "pending"}
+    names = [c for c in order if c not in hidden]
+    extra = sorted((c for c in in_use if c not in order and c not in hidden),
+                   key=lambda c: widget_cat_rank(c, order))
+    names.extend(extra)
+    if active and active not in names:
+        names.append(active)
+    return names
+
+
 def widget_feed():
     with LOCK:
         w = copy.deepcopy(PREFS["widget"])
@@ -612,7 +634,11 @@ def widget_feed():
                          if (w["show_category"] or by_cat) else ""),
         })
     return {"updated": iso(now()), "total": len(keep), "rows": out,
-            "caps": w["rows"], "group_by": w["group_by"]}
+            "caps": w["rows"], "group_by": w["group_by"],
+            # Round 8 ("Widget category chips"): the filter in force, echoed
+            # so the widget can draw the active chip without a second
+            # request, and the chips to offer it.
+            "category": w["category"], "categories": widget_categories(w["category"])}
 
 
 def clean_tags(v, field="tags"):
@@ -969,6 +995,20 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/widget" and method == "GET":
             return self._send(200, widget_feed())
+
+        if path == "/api/widget/category" and method == "POST":
+            # Round 8: a dedicated call so the widget extension gets one
+            # intent and one shot at the network instead of a GET+PUT of the
+            # whole prefs document (api.md, "Widget category chips"). Same
+            # validation as widget.category inside PUT /api/prefs.
+            body = self._body()
+            cat = body.get("category")
+            if cat is not None and not (isinstance(cat, str) and PROJECT_RE.match(cat)):
+                raise ApiError(422, "invalid_request",
+                               "category must be a category name or null")
+            with LOCK:
+                PREFS["widget"]["category"] = cat
+            return self._send(204, None)
 
         if path == "/api/tasks" and method == "GET":
             status = params.get("status") or "pending"

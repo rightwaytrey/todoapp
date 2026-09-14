@@ -295,3 +295,25 @@ class CategoryDelete(BaseModel):
     @classmethod
     def v_move_to(cls, v):
         return clean_project(v)
+
+
+# --------------------------------------------------------------------------- #
+# Widget (docs/api.md round 8: POST /api/widget/category)
+# --------------------------------------------------------------------------- #
+class WidgetCategorySet(BaseModel):
+    """The one field `POST /api/widget/category` accepts.
+
+    Validated exactly like `PUT /api/prefs` validates `widget.category`
+    (`WidgetPrefs.v_category` in prefs.py): `clean_project` is that same
+    pattern, `^[A-Za-z0-9_.-]{1,40}$` or null, already shared by every other
+    category-shaped field in this file.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    category: Optional[str] = None
+
+    @field_validator("category")
+    @classmethod
+    def v_category(cls, v):
+        return clean_project(v)

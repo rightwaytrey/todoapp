@@ -636,3 +636,37 @@ follow it at their next refresh. The **No category** section is pinned last
 and does not drag. Manual task ordering (`sort.mode: "manual"`) keeps working
 inside a section: the midpoint rule is applied between the row's new
 neighbours in that section, and `order` is still one global number.
+
+### Widget category chips (2026-09-14, round 8)
+
+*Planner's contract, written before either side changed. From "how about
+filters for categories for the widget too" → "chips on the widget".*
+
+**`GET /api/widget` gains two top-level keys.** `"category"`: the filter in
+force — `prefs.widget.category`, `null` for all — echoed so the widget can
+draw the active chip without a second request. `"categories"`: the chips to
+offer, in order: every category in `prefs.categories.order` that is not in
+`prefs.categories.hidden`, then the in-use categories not in the order list
+alphabetically (case-folded, raw name as tie-break — `category_key()`'s
+bands), hidden ones excluded — the widget is a picker here, and a hidden
+category is one the user took out of the pickers. The active category is
+always included, hidden or not, so the chip that is lit can always be seen
+and un-lit. Categories with no pending task are still listed: a chip that
+answers "Nothing due 🎉" is honest, and a row that reshuffles as tasks
+complete is not. The widget draws as many as fit its family and always the
+active one.
+
+**`POST /api/widget/category`** `{"category": string|null}` → `204`. Sets
+`prefs.widget.category` and nothing else, with the same validation as
+`PUT /api/prefs` (`^[A-Za-z0-9_.-]{1,40}$` or `null`; anything else `422
+invalid_request` naming `category`), the same atomic write (design.md D15).
+Why a dedicated call and not GET + PUT of the document from Swift: the
+extension gets one intent and one shot at the network, and a client that
+re-sends the whole document is a client that can silently drop keys it was
+not built to know (D15's "unknown keys are dropped" then cuts the wrong way).
+Same allowlist/token gate as everything else. WidgetKit reloads the timeline
+when the intent returns; the next `GET /api/widget` is the account of record.
+
+Nothing else moves: rename and delete already move `widget.category`
+(Categories, above), and the phone's Settings → Widget → Category shows the
+same value the chips set.

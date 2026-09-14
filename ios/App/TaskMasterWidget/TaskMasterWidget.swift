@@ -76,6 +76,27 @@
 //  list — which is where a plain launch goes anyway, so that one would work
 //  with no handler at all.
 //
+//  CATEGORY CHIPS (api.md, "Widget category chips", round 8). In
+//  .systemMedium/.systemLarge only, one more row is drawn directly under the
+//  header: "All", then the feed's own `categories`, trimmed to what the
+//  family can show — chipsToShow() drops chips from the end but never drops
+//  the active one, the feed's `category`, which stays lit in the accent
+//  colour so it can be tapped back off. A tap is SetWidgetCategoryIntent, a
+//  plain AppIntent rather than a Toggle: a chip is a choice among several,
+//  not an on/off. It POSTs to a DEDICATED endpoint, /api/widget/category,
+//  instead of round-tripping the whole prefs document the way the app's
+//  Settings screen does, because this extension gets one intent and one shot
+//  at the network, and a client that re-sends a document it does not fully
+//  understand is a client that can silently drop keys it was never built to
+//  know (D15's "unknown keys are dropped" cuts the wrong way from here). Like
+//  CompleteTaskIntent it does not wait for or read a response: WidgetKit
+//  reloads the timeline when an interactive intent returns, and the next GET
+//  /api/widget is the account of record (D14), not this call. The row costs
+//  one against the family's fit, the same way a category header costs half of
+//  one (kHeaderUnits). .systemSmall draws no chips: it has no room, and while
+//  a Button — unlike a Link — would still fire there, the family is meant to
+//  be one glance, not a picker.
+//
 //  Deployment target is iOS 17.0 — THIS TARGET ONLY. The app stays at 15.0, and
 //  scripts/add_widget_target.rb is what sets the floor, so re-run it after any
 //  `npx cap sync ios`. The floor moved for the interactive row — it was
@@ -170,7 +191,9 @@ private let kArmedMaxAge: TimeInterval = 60
 // MARK: - The widget feed, exactly as api.md spells it
 //
 // `{"updated": iso, "total": int, "rows": [{uuid, text, due, overdue, group,
-// category}], "caps": {small, medium, large}, "group_by": "due"|"category"}`.
+// category}], "caps": {small, medium, large}, "group_by": "due"|"category",
+// "category": string|null, "categories": [string]}` — the last two added in
+// round 8 for the chip row (WidgetFeed.category/categories below).
 //
 // Every field but `uuid`, `text` and `rows` itself is Optional, so the
 // synthesised decoder uses decodeIfPresent and a server that omits one — or
@@ -230,6 +253,16 @@ private struct WidgetFeed: Decodable {
     /// round-5 feed. The only field in this struct that changes how the rows are
     /// DRAWN rather than what they say — see isGroupedByCategory().
     let group_by: String?
+    /// The filter in force right now — `prefs.widget.category` echoed back,
+    /// nil for "All" (api.md, "Widget category chips", round 8). Only read to
+    /// light the right chip; the rows themselves arrive already filtered by
+    /// whatever this says.
+    let category: String?
+    /// The chips to offer, in the server's order, "All" not among them — the
+    /// view adds that itself (round 8). Nil or empty both mean "draw no chip
+    /// row", which is also exactly what an older server's feed decodes to,
+    /// since it never sends this key at all.
+    let categories: [String]?
 
     // No CodingKeys: every property above is spelled exactly as the wire is —
     // `group_by` included, underscore and all. The struct must not grow a
@@ -457,6 +490,13 @@ struct TodayEntry: TimelineEntry {
     /// only two: whether a header is drawn over each run, and whether a row
     /// draws its own "· category" — it must not, the header just said it.
     let groupByCategory: Bool
+    /// `prefs.widget.category` echoed back — nil for "All" — so the view knows
+    /// which chip to light without a second request (api.md round 8).
+    let chipCategory: String?
+    /// The chips to offer, "All" not included — the view adds that. Empty
+    /// means no chip row at all, which is also what an older server's feed
+    /// (no `categories` key) decodes to.
+    let chipCategories: [String]
     /// When the shown list was actually fetched; nil when there has never been
     /// a successful fetch.
     let updated: Date?
@@ -480,6 +520,13 @@ private struct FeedContents {
     let caps: RowCaps
     /// `group_by`, resolved to the one question anything downstream asks of it.
     let groupByCategory: Bool
+    /// The feed's `category` and `categories`, carried through verbatim — see
+    /// WidgetFeed. `chipCategories` is never nil past this point: an absent or
+    /// null `categories` on the wire becomes empty here, which is also "draw
+    /// no chip row" to the view, so nothing downstream has to ask "or nil?"
+    /// twice.
+    let chipCategory: String?
+    let chipCategories: [String]
 }
 
 /// Decodes a response body. nil when the body is not the feed api.md promises —
@@ -515,7 +562,9 @@ private func decodeFeed(_ data: Data) -> FeedContents? {
     return FeedContents(rows: rows,
                         total: feed.total ?? rows.count,
                         caps: capsFrom(feed.caps),
-                        groupByCategory: isGroupedByCategory(feed.group_by))
+                        groupByCategory: isGroupedByCategory(feed.group_by),
+                        chipCategory: feed.category,
+                        chipCategories: feed.categories ?? [])
 }
 
 /// The last body that parsed, decoded again on the way out. Storing the raw
@@ -536,6 +585,7 @@ private func cachedEntry(armed: Set<String>) -> TodayEntry? {
     let when = store.object(forKey: kCacheDateKey) as? Date
     return TodayEntry(date: Date(), rows: feed.rows, total: feed.total, caps: feed.caps,
                       groupByCategory: feed.groupByCategory,
+                      chipCategory: feed.chipCategory, chipCategories: feed.chipCategories,
                       updated: when, error: nil, armed: armed)
 }
 
@@ -611,20 +661,41 @@ private func liveArmed() -> Set<String> {
     return Set(live.keys)
 }
 
-/// The one WRITE this extension can make: POST /api/tasks/<uuid>/done, the same
-/// call the app makes when a row is checked off.
+/// The shape every WRITE this extension makes shares: an ephemeral session,
+/// the fetch's own timeout, and a response that is thrown away. Factored out
+/// of postDone so that postCategory() (api.md round 8, below) can share it
+/// rather than re-describe a URLSession; postDone's own behaviour is
+/// unchanged, only how much of it lives inline here.
 ///
-/// It is deliberately dumb. It does not read the response body and does not
-/// call WidgetCenter: WidgetKit reloads this widget's timeline as soon as the
-/// intent returns, and the fetch that follows is the only account of what
-/// happened worth believing. So a POST that fails shows up as "the row is still
-/// there" — which is exactly right, and better than a row that vanishes locally
-/// over a task the server never completed.
+/// Neither caller reads the response body or calls WidgetCenter: WidgetKit
+/// reloads this widget's timeline as soon as the interactive intent that
+/// called this returns, and the fetch that follows is the only account of
+/// what happened worth believing. So a write that fails shows up as "nothing
+/// changed yet" — which is exactly right, and better than something flipping
+/// locally that the server never actually did.
 ///
-/// The same two limitations as the fetch (D7) apply: the server is whatever
-/// serverBase() reads out of this extension's Info.plist, and no bearer token is
-/// sent, so if TASKMASTER_TOKEN is ever set on the server the whole widget stops
-/// working, not just this box.
+/// The same two limitations as the fetch (D7) apply to every caller: the
+/// server is whatever serverBase() reads out of this extension's Info.plist,
+/// and no bearer token is sent, so if TASKMASTER_TOKEN is ever set on the
+/// server every write this file makes stops working, not just this one.
+///
+/// `try?`, on purpose: an intent that throws puts an error on the widget, and
+/// "the tailnet is down" is not something anyone can act on from the home
+/// screen.
+private func sendWrite(_ request: URLRequest) async {
+    let config = URLSessionConfiguration.ephemeral
+    config.timeoutIntervalForRequest = kTimeout
+    config.timeoutIntervalForResource = kTimeout
+    config.waitsForConnectivity = false
+    let session = URLSession(configuration: config)
+    defer { session.finishTasksAndInvalidate() }
+
+    _ = try? await session.data(for: request)
+}
+
+/// POST /api/tasks/<uuid>/done, the same call the app makes when a row is
+/// checked off. See sendWrite() just above for what happens to the request
+/// once this hands it over.
 private func postDone(_ uuid: String) async {
     // A uuid that cannot be put in a URL is not worth an error badge on the
     // home screen; the row simply stays. (The server refuses anything that is
@@ -639,18 +710,7 @@ private func postDone(_ uuid: String) async {
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.timeoutInterval = kTimeout
-
-    let config = URLSessionConfiguration.ephemeral
-    config.timeoutIntervalForRequest = kTimeout
-    config.timeoutIntervalForResource = kTimeout
-    config.waitsForConnectivity = false
-    let session = URLSession(configuration: config)
-    defer { session.finishTasksAndInvalidate() }
-
-    // `try?`, on purpose: an intent that throws puts an error on the widget,
-    // and "the tailnet is down" is not something anyone can act on from the
-    // home screen.
-    _ = try? await session.data(for: request)
+    await sendWrite(request)
 }
 
 /// What a tap on a row's box does.
@@ -740,6 +800,78 @@ struct CompleteTaskIntent: SetValueIntent {
     }
 }
 
+// MARK: - Setting the widget's category filter (api.md round 8)
+
+/// POST /api/widget/category — the one write SetWidgetCategoryIntent makes:
+/// sets `prefs.widget.category` and nothing else. `nil` means "All" and goes
+/// out as JSON `null`, matching the request body the contract names. Reuses
+/// sendWrite() — the same session shape, timeout and base as postDone() above
+/// — and the same "ignore the response, WidgetKit's reload is the account of
+/// record" contract (design.md D14).
+private func postCategory(_ category: String?) async {
+    guard let base = serverBase(),
+          let url = URL(string: base + "/api/widget/category") else {
+        return
+    }
+
+    // Built by hand rather than through Encodable: one key, one shape, and
+    // NSNull is what actually turns a nil into the JSON `null` the contract
+    // asks for — boxing a nil String straight into a [String: Any] would give
+    // JSONSerialization an untyped Optional it does not recognise, and the
+    // encode below would fail silently for exactly the "All" case.
+    let value: Any
+    if let category = category {
+        value = category
+    } else {
+        value = NSNull()
+    }
+    guard let data = try? JSONSerialization.data(withJSONObject: ["category": value]) else {
+        return
+    }
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.timeoutInterval = kTimeout
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = data
+    await sendWrite(request)
+}
+
+/// What a tap on a chip does. A plain AppIntent behind a Button, not a
+/// Toggle behind a SetValueIntent like CompleteTaskIntent: a chip is a choice
+/// among several, not an on/off, so there is no "value the tap produced" to
+/// carry and nothing here to arm — WidgetKit reloads this widget's timeline
+/// when any interactive intent returns, the same guarantee postDone leans on,
+/// and the chip the user now expects lit is whatever the next
+/// GET /api/widget says (design.md D14). This call's only job is to make that
+/// true on the server before the reload goes and asks.
+///
+/// Internal, not private, for the same reason CompleteTaskIntent is: a Button
+/// takes it as a generic AppIntent, and the App Intents metadata this target
+/// emits at build time has to be able to name the type.
+struct SetWidgetCategoryIntent: AppIntent {
+    static var title: LocalizedStringResource = "Set widget category"
+
+    /// "" means All — the same convention the wire and chipBody() use, so
+    /// there is one sentinel instead of a String and a separate Bool, and a
+    /// @Parameter, which cannot hold a plain Optional String, never has to
+    /// invent one of its own.
+    @Parameter(title: "Category") var category: String
+
+    /// AppIntent requires the empty init; the other is what a chip is built
+    /// with.
+    init() {}
+
+    init(category: String) {
+        self.category = category
+    }
+
+    func perform() async throws -> some IntentResult {
+        await postCategory(category.isEmpty ? nil : category)
+        return .result()
+    }
+}
+
 // MARK: - Provider
 
 struct TaskMasterProvider: TimelineProvider {
@@ -759,7 +891,8 @@ struct TaskMasterProvider: TimelineProvider {
             TodayRow(id: "3", text: "Pay the water bill", due: "today", overdue: false, category: "")
         ]
         return TodayEntry(date: Date(), rows: rows, total: rows.count, caps: .fallback,
-                          groupByCategory: false, updated: Date(), error: nil, armed: [])
+                          groupByCategory: false, chipCategory: nil, chipCategories: [],
+                          updated: Date(), error: nil, armed: [])
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TodayEntry) -> Void) {
@@ -784,7 +917,8 @@ struct TaskMasterProvider: TimelineProvider {
         // whoever reads it to the Tailscale app for no reason.
         guard serverBase() != nil else {
             let entry = TodayEntry(date: Date(), rows: [], total: 0, caps: .fallback,
-                                   groupByCategory: false, updated: nil,
+                                   groupByCategory: false, chipCategory: nil, chipCategories: [],
+                                   updated: nil,
                                    error: "Server not configured", armed: armed)
             completion(Timeline(entries: [entry], policy: .after(next)))
             return
@@ -799,6 +933,7 @@ struct TaskMasterProvider: TimelineProvider {
                 store.set(now, forKey: kCacheDateKey)
                 entry = TodayEntry(date: now, rows: feed.rows, total: feed.total,
                                    caps: feed.caps, groupByCategory: feed.groupByCategory,
+                                   chipCategory: feed.chipCategory, chipCategories: feed.chipCategories,
                                    updated: now, error: nil, armed: armed)
             } else if let cached = cachedEntry(armed: armed) {
                 // Off the tailnet, or the server is down. The last good list is
@@ -807,7 +942,8 @@ struct TaskMasterProvider: TimelineProvider {
                 entry = cached
             } else {
                 entry = TodayEntry(date: Date(), rows: [], total: 0, caps: .fallback,
-                                   groupByCategory: false, updated: nil,
+                                   groupByCategory: false, chipCategory: nil, chipCategories: [],
+                                   updated: nil,
                                    error: "Can't reach the server", armed: armed)
             }
             // .after, not .atEnd: there is exactly one entry, and its content
@@ -839,6 +975,15 @@ private let kHeaderBelow: CGFloat = 2
 /// is one: "about 17 pt" is a specific claim, not a value shared with
 /// anything else already in the file.
 private let kAddSize: CGFloat = 17
+
+/// The chip row's per-family ceiling, "All" included. api.md round 8 only
+/// requires that the widget "draws as many as fit its family and always the
+/// active one" — it leaves the exact width to the client, the same way it
+/// leaves kFitsSmall/Medium/Large to this file rather than dictating pixel
+/// math. 4 and 6 are this file's own picks, not a measured width: it has no
+/// way to measure text before drawing it.
+private let kChipLimitMedium = 4
+private let kChipLimitLarge = 6
 
 /// A `taskmaster://<path>` URL for a Link's destination. Link, unlike
 /// .widgetURL at the bottom of body(), takes a non-Optional URL — and
@@ -908,12 +1053,30 @@ struct TaskMasterWidgetView: View {
     /// cannot overflow — asking for 20 rows on a small widget gets 3. With no
     /// caps in the feed both sides are kFits*, and an ungrouped widget draws
     /// exactly the 3/5/12 it always has.
+    ///
+    /// Down by one more when the chip row draws (api.md round 8): that row
+    /// costs a whole row, not the half a category header costs, and it is
+    /// charged here rather than inside groupedRowCount() so the flat,
+    /// ungrouped layout — which never goes near kRowUnits at all — still pays
+    /// for it too.
     private var fits: Int {
+        let base: Int
         switch family {
-        case .systemSmall:  return kFitsSmall
-        case .systemMedium: return kFitsMedium
-        default:            return kFitsLarge
+        case .systemSmall:  base = kFitsSmall
+        case .systemMedium: base = kFitsMedium
+        default:            base = kFitsLarge
         }
+        return showsChips ? base - 1 : base
+    }
+
+    /// Whether the chip row draws at all: medium/large only — .systemSmall has
+    /// no room and no interactive Links (file header), and while a Button,
+    /// unlike a Link, would still fire there, the family is meant to be one
+    /// glance, not a picker — and only when the feed actually offered
+    /// categories. Empty and "never sent" both read as "no chips", which is
+    /// exactly how an older server's feed decodes (see WidgetFeed.categories).
+    private var showsChips: Bool {
+        return family != .systemSmall && !entry.chipCategories.isEmpty
     }
 
     private var footerText: String {
@@ -1107,6 +1270,77 @@ struct TaskMasterWidgetView: View {
         }
     }
 
+    /// Which of "All" + the feed's categories fit the chip row, "All" ("")
+    /// always first: at most `limit` chips, cut from the END — never the
+    /// active one, which is swapped back into the last slot if trimming would
+    /// have dropped it. api.md round 8 requires the active category stay
+    /// visible ("the chip that is lit can always be seen and un-lit"); this
+    /// is what keeps that true once there are more categories than the row
+    /// can show.
+    private func chipsToShow(_ categories: [String], active: String?, limit: Int) -> [String] {
+        let all: [String] = [""] + categories
+        guard limit > 0, all.count > limit else { return all }
+
+        var shown = Array(all.prefix(limit))
+        let activeName = active ?? ""
+        if !shown.contains(activeName), let idx = all.firstIndex(of: activeName) {
+            shown[shown.count - 1] = all[idx]
+        }
+        return shown
+    }
+
+    /// medium's and large's chip-count ceiling. Only ever consulted when
+    /// showsChips is true, which has already ruled out .systemSmall.
+    private var chipLimit: Int {
+        return family == .systemMedium ? kChipLimitMedium : kChipLimitLarge
+    }
+
+    /// One chip: a capsule Button that sets `prefs.widget.category` through
+    /// SetWidgetCategoryIntent. `""` means "All", the same convention the
+    /// wire and the intent use. Filled with the accent colour and white text
+    /// when it is the one in force, a light gray capsule otherwise — colour
+    /// is the only thing that says which chip is active, so there is no
+    /// second state to keep in sync with it.
+    ///
+    /// `label` is hoisted into its own `let` rather than handed to Text as a
+    /// ternary inline, the same reason CheckToggleStyle's `spoken` is: both
+    /// branches would otherwise be string literals with nothing to anchor
+    /// Text's overload to String over LocalizedStringKey.
+    ///
+    /// `fixedSize` for the same reason the due label carries it in rowWords:
+    /// this Text must never wrap or shrink to something unreadable — which
+    /// chips exist at all is chipsToShow()'s decision, not the layout's.
+    private func chipBody(_ name: String, active: Bool) -> some View {
+        let label: String = name.isEmpty ? "All" : name
+
+        return Button(intent: SetWidgetCategoryIntent(category: name)) {
+            Text(label)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .fixedSize()
+                .foregroundColor(active ? .white : .primary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(active ? Color.accentColor : Color.gray.opacity(0.25)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The chip row: "All", then the feed's categories, cut down to what this
+    /// family can show. Drawn directly under the header in body(), medium and
+    /// large only (showsChips). Nothing else in the row is tappable.
+    private var chipRowBody: some View {
+        let shown = chipsToShow(entry.chipCategories, active: entry.chipCategory, limit: chipLimit)
+        let activeName = entry.chipCategory ?? ""
+
+        return HStack(spacing: 6) {
+            ForEach(shown, id: \.self) { name in
+                chipBody(name, active: name == activeName)
+            }
+        }
+        .padding(.bottom, 6)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
@@ -1130,6 +1364,15 @@ struct TaskMasterWidgetView: View {
                 }
             }
             .padding(.bottom, 6)
+
+            // The chip row (api.md round 8): medium/large only, and only when
+            // the feed actually offered categories — see showsChips. Drawn
+            // before the error/empty/list branch below so it stays visible
+            // even on a "Nothing due" screen, which is the whole point of a
+            // chip for a category with nothing pending in it right now.
+            if showsChips {
+                chipRowBody
+            }
 
             if let error = entry.error {
                 Text(error)
