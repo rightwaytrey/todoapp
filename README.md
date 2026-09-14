@@ -139,17 +139,18 @@ ruby scripts/add_widget_target.rb    # needs the xcodeproj gem; no-op if present
 
 ## Shipping
 
-**There are two lanes, and picking the wrong one is what burns the month's
-minutes.** A store build is ~30 billed macOS minutes; a bundle is free
-(`design.md` D11).
+**There are two lanes.** A bundle is free and lands at the next cold launch
+(`design.md` D11); a store build runs on the self-hosted macOS VM on the home
+server (SHIP.md, "Every build") — no billed minutes since 2026-09-14, but one
+machine shared by three apps, so still one dispatch per explicit go.
 
 | What changed | Lane | Cost | Lands |
 |---|---|---|---|
 | `www/index.html` — anything at all: markup, CSS, JS, a copy fix | `scripts/ship_web.sh "what changed"` (or `python3 scripts/publish_bundle.py --www www --notes "…"`) | **zero Actions minutes** | phones pick it up at their next cold launch |
 | `server/**` | `systemctl --user restart taskmaster-api` | none | at once |
 | `docs/`, `README.md`, `SHIP.md` | nothing to ship | none | — |
-| A Capacitor plugin, `capacitor.config.ts`, `ios/App/App/Info.plist`, icons, the app id | store build | ~30 min | TestFlight, ~10 min of Apple processing, then install |
-| `ios/App/TaskMasterWidget/**`, `scripts/add_widget_target.rb` | store build | ~30 min | as above |
+| A Capacitor plugin, `capacitor.config.ts`, `ios/App/App/Info.plist`, icons, the app id | store build on the house VM | none (~3–5 min of the VM) | TestFlight, ~10 min of Apple processing, then install |
+| `ios/App/TaskMasterWidget/**`, `scripts/add_widget_target.rb` | store build on the house VM | none (~3–5 min of the VM) | as above |
 
 Two rules that make the web lane safe:
 

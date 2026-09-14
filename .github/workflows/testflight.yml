@@ -4,18 +4,27 @@
 # web-bundle stage: the UI is a single committed www/index.html, so there is
 # nothing to build first — `npx cap sync ios` copies it into the Xcode project.
 #
+# It runs on the SELF-HOSTED macOS VM on the home server (Docker-OSX,
+# Xcode 26.3; the same VM carpool and transitnav-ios build on), registered to
+# this repo as the runner `macos-xcode-vm-todoapp`: ZERO billable minutes. The
+# VM must be up (its start.sh) and the runner online and idle before a
+# dispatch — `gh api repos/rightwaytrey/todoapp/actions/runners`. Falling back
+# to GitHub's own image is one line (`runs-on: macos-26`) and is what this
+# file did until 2026-09-14, but it bills at 10x, which is the whole reason
+# the VM exists (SHIP.md).
+#
 # DISPATCH ONLY. There is deliberately no `push:` trigger (design.md D5):
 #
-#   * macOS runners bill at 10x the Linux rate, so one ~20-minute build costs
-#     ~200 minutes of the monthly allowance. August 2026 ran out of minutes
-#     entirely, on dispatches that shipped nothing new.
-#   * This is a single-file app. A build is only worth spending on when
-#     www/index.html or the shell (capacitor.config.ts, ios/, this file)
-#     actually changed. A server-only or docs-only commit ships nothing to the
-#     phone — the API is deployed by systemd on the home server, not by this
-#     workflow.
+#   * A build is only worth running when www/index.html or the shell
+#     (capacitor.config.ts, ios/, this file) actually changed. A server-only or
+#     docs-only commit ships nothing to the phone — the API is deployed by
+#     systemd on the home server, not by this workflow. And a web-only change
+#     has a cheaper lane still: scripts/ship_web.sh (design.md D11).
+#   * The runner is one VM that also serves two other apps, one build at a
+#     time, and August 2026 — on GitHub's runners then — ran the account out of
+#     minutes on dispatches that shipped nothing new. The habit stays.
 #
-# So: change www/index.html, commit, then dispatch by hand:
+# So: commit, then dispatch by hand:
 #
 #   echo '{"ref":"main"}' | gh api --method POST \
 #     repos/rightwaytrey/todoapp/actions/workflows/testflight.yml/dispatches --input -
@@ -63,10 +72,15 @@ on:
 
 jobs:
   testflight:
-    # macos-26: App Store Connect rejects uploads built with SDKs older than
-    # iOS 26 (Xcode 26), which this image has as its default toolchain.
-    runs-on: macos-26
-    timeout-minutes: 30
+    # The label carries the toolchain: App Store Connect rejects uploads built
+    # with SDKs older than iOS 26, and xcode-26.3 is what the VM has (the newest
+    # Xcode that runs on macOS Sequoia). If the VM is rebuilt with a different
+    # Xcode, change its label rather than let this drift. Billable fallback:
+    # `runs-on: macos-26`.
+    runs-on: [self-hosted, macOS, xcode-26.3]
+    # carpool's builds on the same VM take ~3 min; the first run of a fresh
+    # runner also fetches the Capacitor pods and node modules, so leave room.
+    timeout-minutes: 45
     env:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -78,6 +92,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      # The workspace persists between runs on a self-hosted runner; a stale
+      # build/ would let `build/export/*.ipa` pick up an old IPA.
+      - name: Clean previous build products
+        run: rm -rf build
 
       - name: Install npm dependencies
         run: npm ci
@@ -179,6 +198,21 @@ jobs:
           mkdir -p ~/private_keys
           echo "${{ secrets.ASC_KEY_P8_BASE64 }}" | base64 --decode > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
 
+      # Self-hosted only: the runner's LaunchAgent session sees the login
+      # keychain as locked even when it is unlocked for the desktop user, and
+      # the export's cloud-managed signing then fails with
+      # errSecInternalComponent (carpool hit exactly this). Unlock it for this
+      # job and re-assert non-interactive access. The password lives only in
+      # the VM (~/.keychain-pw, mode 600), never in a GitHub secret.
+      - name: Unlock login keychain (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: |
+          KC="$HOME/Library/Keychains/login.keychain-db"
+          security unlock-keychain -p "$(cat ~/.keychain-pw)" "$KC"
+          security set-keychain-settings "$KC"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$(cat ~/.keychain-pw)" "$KC" >/dev/null
+          security find-identity -v -p codesigning | tail -2
+
       - name: Stamp team id into ExportOptions
         run: |
           sed -i '' "s/__APPLE_TEAM_ID__/${APPLE_TEAM_ID}/" ios/ExportOptions.plist
@@ -224,10 +258,16 @@ jobs:
             -authenticationKeyPath ~/private_keys/AuthKey_${ASC_KEY_ID}.p8 | tail -30
           ls -lh build/export
 
+      # altool can print "Failed to upload package." and still exit 0 (seen on
+      # carpool run 34305645241), so the step succeeds only on Apple's own
+      # success line.
       - name: Upload to TestFlight
         run: |
+          set -o pipefail
           xcrun altool --upload-app -f build/export/*.ipa -t ios \
-            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" 2>&1 | tee /tmp/altool.log
+          grep -q 'UPLOAD SUCCEEDED' /tmp/altool.log \
+            || { echo "::error::TestFlight upload did not report UPLOAD SUCCEEDED"; exit 1; }
 
       - name: Cleanup key
         if: always()

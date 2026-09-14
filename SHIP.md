@@ -123,16 +123,77 @@ shell that could use one.
 
 ## Every build
 
-Everything from here down costs ~30 billed macOS minutes, so **dispatch only
-with the user's explicit go**, and only when something *native* changed: a
-plugin, `capacitor.config.ts`, `Info.plist`, an icon, the widget. There is no
-`push:` trigger (macOS minutes bill at 10x; see the workflow header):
+Since 2026-09-14 the workflow targets the **self-hosted macOS VM on the home
+server** (Docker-OSX at `/mnt/ssd/macos-vm`, Xcode 26.3 — the same VM carpool
+and transitnav-ios build on): `runs-on: [self-hosted, macOS, xcode-26.3]`.
+**Zero billed minutes.** Before that it ran on GitHub's `macos-26` image at 10x
+billing, which is what ran August out of minutes; that is still the one-line
+fallback in the workflow if the VM is ever down for good.
+
+### Registering the runner (one time, by hand)
+
+A personal account has no org-level runners, so each repo gets its own runner
+instance in the guest: carpool's is `~/actions-runner`, transitnav-ios's is
+`~/actions-runner-transitnav`, and this repo's is `~/actions-runner-todoapp`,
+registered as **`macos-xcode-vm-todoapp`**. It installs a LaunchAgent that
+starts at every auto-login of the VM, which is why a Claude session is not
+allowed to do it — run this on the home server yourself, with the VM up:
+
+```bash
+# 1. a one-hour registration token for this repo (it goes nowhere else)
+TOKEN=$(gh api -X POST repos/rightwaytrey/todoapp/actions/runners/registration-token --jq .token)
+
+# 2. in the guest: the runtime copied from the transitnav instance, registered,
+#    and its LaunchAgent (a copy of the transitnav plist: KeepAlive, RunAtLoad,
+#    Interactive) bootstrapped into the GUI session, gui/501
+ssh -p 50922 rwt@127.0.0.1 bash -s <<EOF
+set -e
+D=\$HOME/actions-runner-todoapp; mkdir -p "\$D"
+cd \$HOME/actions-runner-transitnav
+cp -R bin externals config.sh run.sh runsvc.sh run-helper.sh.template run-helper.cmd.template safe_sleep.sh svc.sh env.sh "\$D"/
+cd "\$D"
+./config.sh --unattended --url https://github.com/rightwaytrey/todoapp --token "$TOKEN" \
+  --name macos-xcode-vm-todoapp --labels xcode-26.3,todoapp --work _work --replace
+L=actions.runner.rightwaytrey-todoapp.macos-xcode-vm-todoapp
+mkdir -p \$HOME/Library/Logs/\$L
+sed -e "s#actions.runner.rightwaytrey-transitnav-ios.macos-xcode-vm-transitnav#\$L#g" \
+    -e "s#/Users/rwt/actions-runner-transitnav#/Users/rwt/actions-runner-todoapp#g" \
+    \$HOME/Library/LaunchAgents/actions.runner.rightwaytrey-transitnav-ios.macos-xcode-vm-transitnav.plist \
+    > \$HOME/Library/LaunchAgents/\$L.plist
+launchctl bootstrap gui/501 \$HOME/Library/LaunchAgents/\$L.plist
+EOF
+
+# 3. GitHub should list it within a few seconds
+gh api repos/rightwaytrey/todoapp/actions/runners --jq '.runners[] | "\(.name) \(.status) busy=\(.busy)"'
+```
+
+Labels `self-hosted`, `macOS` and `X64` are added by the runner itself, which
+is what the workflow's `runs-on` matches. The job unlocks the login keychain
+with `~/.keychain-pw` (a self-hosted-only step, the same one carpool's job
+runs), so nothing about signing is configured here. To undo:
+`launchctl bootout gui/501/$L`, then `./config.sh remove` in the directory
+with a fresh removal token.
+
+Still **dispatch only with the user's explicit go**, and only when something
+*native* changed: a plugin, `capacitor.config.ts`, `Info.plist`, an icon, the
+widget. The VM is one machine serving three apps, one build at a time, so
+check first that it is up and that no runner on it is busy:
+
+```bash
+gh api repos/rightwaytrey/todoapp/actions/runners \
+  --jq '.runners[] | "\(.name) \(.status) busy=\(.busy)"'      # online, busy=false
+gh api repos/rightwaytrey/carpool/actions/runners --jq '.runners[].busy'   # false
+```
+
+If the runner is `offline`, the VM is down: `/mnt/ssd/macos-vm/start.sh` on
+the home server brings it back, and the runner's LaunchAgent starts with the
+auto-login. Then:
 
 ```bash
 echo '{"ref":"main"}' | gh api --method POST \
   repos/rightwaytrey/todoapp/actions/workflows/testflight.yml/dispatches --input -
 
-gh run watch          # ~15 min of build, then upload
+gh run watch          # ~3–5 min of build, then upload
 ```
 
 Then wait **~10 minutes** for Apple to finish processing before the build shows
