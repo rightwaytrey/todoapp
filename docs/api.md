@@ -382,7 +382,8 @@ Defaults apply for anything missing:
   "categories": { "order": ["personal","work","claude","fun","inbox"], "hidden": [] },
   "chips":      { "order": ["p:personal","p:work","p:claude","p:fun","p:inbox","t:claude","t:alert"],
                   "hidden": [] },                 // "p:<category>" | "t:<tag>"; unknown ones are ignored
-  "sort":       { "mode": "due" },                 // "due" | "priority" | "urgency" | "manual"
+  "sort":       { "mode": "due",                   // "due" | "priority" | "urgency" | "manual"
+                  "group_by": "due" },             // "due" | "category" — how the phone's list is sectioned (round 7)
   "widget":     { "groups": ["overdue","today"],   // any of overdue,today,upcoming,none
                   "upcoming_days": 7,              // when "upcoming" is in groups
                   "category": null,                // null = all, else one category name
@@ -606,3 +607,32 @@ of `show_category`. The widget draws a small header before the first row of
 each category run (no-category rows get the header "No category") and counts
 each header as roughly half a row against the family's cap. With `"due"`
 nothing changes from round 5.
+
+### List grouping by category (2026-09-14, round 7)
+
+*Planner's contract, written before either side changed. From "have categories
+be rearrangeable … in the Tasks list".*
+
+`prefs.sort` gains **`group_by`**: `"due"` (default, and what every client
+before round 7 does — the Overdue / Today / Upcoming / No date sections) or
+`"category"`. Anything else is `422 invalid_request` naming the field; a
+missing key reads as `"due"`. Nothing else in the contract moves: `GET
+/api/tasks` still returns the pending half already sorted (design.md D8/D14),
+and the widget's own `widget.group_by` stays a separate setting.
+
+Under `"category"` the phone draws **one section per category**, in
+`prefs.categories.order`, then the categories the user has never arranged
+alphabetically (case-folded, raw name as tie-break — the same bands as
+`category_key()` in `server/app/routers/widget.py`), then **No category**
+last. Inside a section the rows keep the order the server sent; the client
+does not re-sort. A row still shows its due label and its overdue colour, so
+nothing the due grouping said is lost, only where it sits.
+
+**The section headers drag.** Dropping one writes the *whole*
+`categories.order` back through `PUT /api/prefs` — the list on screen, hidden
+ones included in their current place — exactly what Settings → Categories'
+arrows and drag write, so there is one order and the widget's category runs
+follow it at their next refresh. The **No category** section is pinned last
+and does not drag. Manual task ordering (`sort.mode: "manual"`) keeps working
+inside a section: the midpoint rule is applied between the row's new
+neighbours in that section, and `order` is still one global number.

@@ -58,6 +58,10 @@ CHIP_RE = re.compile(r"^[pt]:[A-Za-z0-9_.-]{1,40}$")
 # keeps obvious rubbish off the argv.
 RECUR_RE = re.compile(r"^[0-9]*[a-z]+$")
 SORT_MODES = ("due", "priority", "urgency", "manual")
+# How the TASKS LIST is sectioned (api.md, "List grouping by category", round
+# 7) -- separate from WIDGET_GROUP_BY below, which is the widget's own
+# equivalent setting and stays independent per that same section.
+SORT_GROUP_BY = ("due", "category")
 WIDGET_GROUPS = ("overdue", "today", "upcoming", "none")
 # How the feed is ORDERED (api.md, "Widget grouping by category"). It does not
 # change which tasks are in it -- widget.groups still decides that either way.
@@ -72,7 +76,7 @@ DEFAULT_PREFS = {
     "categories": {"order": list(PA_PROJECTS), "hidden": []},
     "chips": {"order": ["p:" + p for p in PA_PROJECTS] + ["t:claude", "t:alert"],
               "hidden": []},
-    "sort": {"mode": "due"},
+    "sort": {"mode": "due", "group_by": "due"},
     "widget": {"groups": ["overdue", "today"], "upcoming_days": 7,
                "category": None,
                "rows": {"small": 3, "medium": 5, "large": 12},
@@ -149,6 +153,14 @@ def clean_prefs(body):
         raise ApiError(422, "invalid_request",
                        "sort.mode must be one of " + ", ".join(SORT_MODES))
     d["sort"]["mode"] = mode
+    # Missing is "due" (round 7): a pre-round-7 client PUTs a document without
+    # it every time it touches sort.mode, and refusing those would break the
+    # sort editor for the sake of a field it does not know.
+    group_by = srt.get("group_by", "due")
+    if group_by not in SORT_GROUP_BY:
+        raise ApiError(422, "invalid_request",
+                       "sort.group_by must be one of " + ", ".join(SORT_GROUP_BY))
+    d["sort"]["group_by"] = group_by
 
     w = body.get("widget") or {}
     if not isinstance(w, dict):

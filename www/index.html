@@ -85,6 +85,11 @@
        end up underneath it. */
     --tabh: 58px;
     --qah: 0px;
+    /* Rewritten from JS (measureBars()) to the floating "+" button's real
+       footprint, 0 when it is hidden (Done, Settings) -- same trick as
+       --qah, and for the same reason: main's bottom padding has to clear
+       whatever is actually floating over the list, not a guessed constant. */
+    --fabh: 0px;
     --sab: env(safe-area-inset-bottom, 0px);
   }
   @media (prefers-color-scheme: dark) {
@@ -192,7 +197,7 @@
 
   /* ---- layout ---------------------------------------------------------- */
   main {
-    padding: 8px 16px calc(var(--tabh) + var(--qah) + var(--sab) + 20px);
+    padding: 8px 16px calc(var(--tabh) + var(--qah) + var(--fabh) + var(--sab) + 20px);
   }
   h2.group {
     display: flex; align-items: baseline; gap: 8px;
@@ -641,11 +646,36 @@
   /* .prefrow centers its children (unlike .task, which top-aligns for
      multi-line rows), so the handle there does not want .task's 5px nudge. */
   .prefrow .draghandle { margin-top: 0; }
-  .task.dragging, .prefrow.dragging {
+  .task.dragging, .prefrow.dragging, .catsection.dragging {
     position: relative; z-index: 6; background: var(--card);
     box-shadow: var(--shadow); border-radius: 10px; cursor: grabbing;
   }
-  .task.dragging .draghandle, .prefrow.dragging .draghandle { color: var(--accent); }
+  .task.dragging .draghandle, .prefrow.dragging .draghandle,
+  .catsection.dragging .draghandle { color: var(--accent); }
+
+  /* ---- category section drag (Tasks list, prefs.sort.group_by = "category",
+     api.md round 7) ------------------------------------------------------- */
+  h2.group.cathead { align-items: center; }
+  h2.group.cathead .catname { flex: 1; min-width: 0; overflow: hidden;
+                               text-overflow: ellipsis; white-space: nowrap; }
+  /* The handle lives in a 12px header, not a 52px row, so its 44px touch
+     target is grown past the paint with ::after (the same trick .fchip and
+     .statusbtn use) instead of drawn at full size, which would dwarf the
+     label next to it. */
+  h2.group.cathead .draghandle {
+    position: relative; width: 22px; height: 22px; color: var(--dim); margin: 0;
+  }
+  h2.group.cathead .draghandle::after { content: ''; position: absolute; inset: -11px; }
+  h2.group.cathead .draghandle svg { width: 18px; height: 18px; }
+  /* Every category section's h2 is the first child of its OWN .catsection
+     wrapper, so the plain h2.group:first-child rule above (meant to shrink
+     the gap under the filter bar for whichever heading is actually first on
+     screen) would otherwise match ALL of them, not just the first -- crowding
+     every section header against the list above it. Cancelled here for any
+     wrapped header, then reinstated, at higher specificity, only for the
+     .catsection that really is first inside #groups. */
+  .catsection h2.group { margin-top: 20px; }
+  #groups > .catsection:first-child h2.group { margin-top: 8px; }
   /* .list and .prefs both clip their corners, which would also clip a row
      lifted out of them. */
   body.dragging .list, body.dragging .prefs { overflow: visible; }
@@ -672,6 +702,30 @@
     .check:active i, .btn:active, #qaAdd:active, .buttonpill:active {
       transform: none;
     }
+  }
+
+  /* ---- floating "+" (round 7, Feature 1) -------------------------------- */
+  /* Fixed ABOVE the quick-add bar's own real height (--qah, measureBars()),
+     so it can never sit over the Add button inside that bar however tall the
+     bar gets (the date-picker row adds a whole extra line to it) -- and above
+     the tab bar and the home-indicator safe area under that. Tasks only: it
+     has nothing to add a task TO on Done or Settings (see show()). */
+  .fab {
+    position: fixed; right: 16px;
+    bottom: calc(var(--tabh) + var(--qah) + var(--sab) + 16px);
+    width: 54px; height: 54px; border-radius: 50%; z-index: 9; padding: 0;
+    border: 0; background: var(--accent); color: var(--accent-text);
+    box-shadow: var(--shadow); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .fab svg {
+    width: 26px; height: 26px; fill: none; stroke: currentColor;
+    stroke-width: 2.4; stroke-linecap: round;
+  }
+  .fab { transition: transform .12s ease, opacity .12s ease; }
+  .fab:active { transform: scale(.94); opacity: .9; }
+  @media (prefers-reduced-motion: reduce) {
+    .fab:active { transform: none; }
   }
 </style>
 </head>
@@ -762,7 +816,9 @@
   <p class="prefhint">
     The server puts the list in this order and both this app and the
     home-screen widget show what it sends (design.md D8). <b>Manual</b> adds a
-    reorder handle to the Tasks screen.
+    reorder handle to the Tasks screen. <b>Group by Category</b> sections the
+    Tasks list by category instead of by due date — drag a section's handle to
+    reorder categories, which reorders them here and on the widget too.
   </p>
 
   <h2 class="group">Categories</h2>
@@ -841,6 +897,15 @@
     <button class="btn small" id="qaPickClear">Clear</button>
   </div>
 </div>
+
+<!-- ===================== floating add (round 7, Feature 1) ============== -->
+<!-- Opens the detail sheet below in NEW-TASK mode (openNewTaskSheet()) --
+     quick-add stays for fast capture; this is for a task that needs the
+     fields quick-add does not have (priority, a time, tags, a repeat) without
+     a save-then-reopen round trip. Tasks tab only -- see show(). -->
+<button class="fab" id="fabAdd" hidden aria-label="New task">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+</button>
 
 <!-- ===================== tab bar ======================================== -->
 <nav class="tabs" id="tabs">
@@ -943,11 +1008,16 @@
       <button class="btn small" id="shAddTag">Add</button>
     </div>
 
-    <label>Notes</label>
-    <div class="annos" id="shAnnos"></div>
-    <div class="addrow">
-      <input type="text" id="shNewNote" placeholder="add a note" aria-label="Add a note">
-      <button class="btn small" id="shAddNote">Add</button>
+    <!-- Hidden as one block in NEW-TASK mode (openNewTaskSheet()): annotating
+         needs a saved uuid to attach to (api.md, "Annotate"), and there is
+         not one until Save. -->
+    <div id="shNotesBlock">
+      <label>Notes</label>
+      <div class="annos" id="shAnnos"></div>
+      <div class="addrow">
+        <input type="text" id="shNewNote" placeholder="add a note" aria-label="Add a note">
+        <button class="btn small" id="shAddNote">Add</button>
+      </div>
     </div>
 
     <p class="tiny" id="shFoot" style="margin-top:16px"></p>
@@ -1127,6 +1197,10 @@ let qaCategory = lsGet(K.qaCategory, '');
 // are right at launch before the network answers. The server's copy wins on
 // every load.
 const SORT_MODES = ['due', 'priority', 'urgency', 'manual'];
+// How the TASKS LIST is sectioned (api.md, "List grouping by category",
+// round 7) -- independent of WIDGET_GROUP_BY below, which is the widget's own
+// separate setting.
+const SORT_GROUP_BY = ['due', 'category'];
 const WIDGET_GROUPS = ['overdue', 'today', 'upcoming', 'none'];
 // How the feed is ORDERED, not what is in it: `groups` still decides which
 // tasks the widget gets either way (api.md, "Widget grouping by category").
@@ -1138,7 +1212,7 @@ const DEFAULT_PREFS = {
   categories: { order: ['personal', 'work', 'claude', 'fun', 'inbox'], hidden: [] },
   chips: { order: ['p:personal', 'p:work', 'p:claude', 'p:fun', 'p:inbox',
                    't:claude', 't:alert'], hidden: [] },
-  sort: { mode: 'due' },
+  sort: { mode: 'due', group_by: 'due' },
   widget: { groups: ['overdue', 'today'], upcoming_days: 7, category: null,
             rows: { small: 3, medium: 5, large: 12 }, show_category: false,
             group_by: 'due' }
@@ -1169,7 +1243,13 @@ function normPrefs(v) {
                                       : DEFAULT_PREFS.chips.order.slice(),
       hidden: strList(ch.hidden)
     },
-    sort: { mode: mode },
+    sort: {
+      mode: mode,
+      // A server that has never heard of it -- a pre-round-7 document, or one
+      // this screen has not written yet -- means "due", the pre-round-7
+      // behaviour (unchanged Overdue/Today/Upcoming/No date sections).
+      group_by: SORT_GROUP_BY.indexOf(so.group_by) >= 0 ? so.group_by : 'due'
+    },
     widget: {
       groups: WIDGET_GROUPS.filter(g => strList(w.groups).indexOf(g) >= 0),
       upcoming_days: clampInt(w.upcoming_days, 1, 60, 7),
@@ -1193,6 +1273,10 @@ let prefs = normPrefs(lsJSON(K.prefs, null));
 let prefsSaving = false;
 
 function sortMode() { return prefs.sort.mode; }
+// api.md round 7, "List grouping by category": sections the Tasks list by
+// category instead of by due date. Independent of sortMode() -- manual
+// ordering still works, just within a section (see commitReorder/startDrag).
+function groupByCategory() { return prefs.sort.group_by === 'category'; }
 function isHiddenCat(name) { return prefs.categories.hidden.indexOf(name) >= 0; }
 function isHiddenChip(v) {
   if (prefs.chips.hidden.indexOf(v) >= 0) return true;
@@ -2168,23 +2252,23 @@ function renderTasks(view, vis) {
   // server sent, with unsent rows spliced in. See orderGroup().
   const groups = { overdue: [], today: [], upcoming: [], none: [] };
   for (const t of vis) groups[groupFor(t)].push(t);
+  const dueOrder = [['overdue', 'Overdue', 'od'], ['today', 'Today', ''],
+                    ['upcoming', 'Upcoming', ''], ['none', 'No date', '']];
 
-  const order = [['overdue', 'Overdue', 'od'], ['today', 'Today', ''],
-                 ['upcoming', 'Upcoming', ''], ['none', 'No date', '']];
-  const html = [];
-  for (const [key, label, cls] of order) {
-    const rows = orderGroup(groups[key], key);
-    if (!rows.length) continue;      // an empty group is not a heading
-    html.push('<h2 class="group ' + cls + '">' + label +
-              '<span class="n">' + rows.length + '</span></h2>');
-    // data-group is what a drop reads back: a drag may only reorder inside one
-    // of these lists, because the group is the due date's business.
-    html.push('<div class="list" data-group="' + key + '">' +
-      rows.map(t => taskRow(t, { waiting: !!view.pendingIds[t.uuid],
-                                 reorder: reorderMode })).join('') +
-      '</div>');
+  if (groupByCategory()) {
+    // One flat, fully-resolved sequence -- the four due-groups back to back,
+    // each already run through orderGroup() exactly as renderDueSections()
+    // paints them, so an optimistic row (D6) is placed by the usual
+    // orderKey()/groupOf() rule BEFORE it is ever bucketed by category.
+    // renderCategorySections() then only buckets this sequence by category;
+    // it never re-sorts it (api.md round 7, "keep the order the rows already
+    // have").
+    const flat = [];
+    for (const [key] of dueOrder) flat.push.apply(flat, orderGroup(groups[key], key));
+    renderCategorySections(flat, view);
+  } else {
+    renderDueSections(groups, dueOrder, view);
   }
-  $('groups').innerHTML = html.join('');
 
   const empty = $('tasksEmpty');
   empty.hidden = vis.length > 0;
@@ -2200,6 +2284,90 @@ function renderTasks(view, vis) {
         '<div class="hint">Tap <b>All</b> above to see every task.</div>'
       : 'Nothing pending. Everything you have is done — add the next thing below.';
   }
+}
+
+// prefs.sort.group_by === 'due' (the default): Overdue / Today / Upcoming /
+// No date, exactly as before round 7.
+function renderDueSections(groups, order, view) {
+  const html = [];
+  for (const [key, label, cls] of order) {
+    const rows = orderGroup(groups[key], key);
+    if (!rows.length) continue;      // an empty group is not a heading
+    html.push('<h2 class="group ' + cls + '">' + label +
+              '<span class="n">' + rows.length + '</span></h2>');
+    // data-group is what a drop reads back: a drag may only reorder inside one
+    // of these lists, because the group is the due date's business.
+    html.push('<div class="list" data-group="' + key + '">' +
+      rows.map(t => taskRow(t, { waiting: !!view.pendingIds[t.uuid],
+                                 reorder: reorderMode })).join('') +
+      '</div>');
+  }
+  $('groups').innerHTML = html.join('');
+}
+
+// Category section order (api.md round 7): prefs.categories.order first, in
+// that order, then every other category alphabetically case-folded (raw name
+// as tie-break), then "" (no category) last. Same bands as the server's
+// widget_cat_rank()/category_key() (docs/api.md, "Widget grouping by
+// category"). Hidden categories are NOT skipped here -- hiding takes a
+// category out of the pickers and the chip row, not out of the Tasks list
+// (design.md D13: its tasks stay), so a hidden category with pending tasks
+// still gets a section, in its normal place.
+function catSectionRank(name) {
+  if (!name) return [2, '', ''];
+  const i = prefs.categories.order.indexOf(name);
+  if (i >= 0) return [0, i, ''];
+  return [1, name.toLowerCase(), name];
+}
+function byCatSection(a, b) {
+  const ra = catSectionRank(a), rb = catSectionRank(b);
+  for (let i = 0; i < ra.length; i++) {
+    if (ra[i] < rb[i]) return -1;
+    if (ra[i] > rb[i]) return 1;
+  }
+  return 0;
+}
+// The one thing that starts a SECTION drag (startSecDrag, below). Sits inside
+// a 12px h2 rather than a 52px row, so its 44px touch target is grown with
+// ::after instead of drawn at full size -- see the CSS.
+function catSecDragHandle(name) {
+  return '<button class="draghandle" data-act="dragsec" data-cat="' + esc(name) +
+    '" aria-label="Reorder the ' + esc(name) + ' section">' +
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path d="M4 7h16M4 12h16M4 17h16"/></svg></button>';
+}
+// prefs.sort.group_by === 'category' (api.md round 7): one section per
+// category with at least one visible task, in catSectionRank() order. `rows`
+// is already the fully-resolved due order (see renderTasks) -- bucketing it
+// here keeps that order inside each section rather than re-sorting.
+function renderCategorySections(rows, view) {
+  const buckets = Object.create(null);
+  const names = [];
+  for (const t of rows) {
+    const name = t.project || '';
+    if (!buckets[name]) { buckets[name] = []; names.push(name); }
+    buckets[name].push(t);
+  }
+  names.sort(byCatSection);
+  const html = names.map(name => {
+    const list = buckets[name];
+    const head = '<h2 class="group cathead">' +
+      (name ? catSecDragHandle(name) : '') +
+      '<span class="catname">' + esc(name || 'No category') + '</span>' +
+      '<span class="n">' + list.length + '</span></h2>';
+    const body = '<div class="list">' +
+      list.map(t => taskRow(t, { waiting: !!view.pendingIds[t.uuid],
+                                 reorder: reorderMode })).join('') +
+      '</div>';
+    // "No category" is pinned last and never drags (api.md round 7): it gets
+    // no .catsection wrapper, so the generic swap in secDragMove() -- which
+    // only ever swaps a dragged section past a sibling THAT HAS the class --
+    // treats it as a wall a section can be dragged up to but not past.
+    return name ? ('<div class="catsection" data-cat="' + esc(name) + '">' +
+                   head + body + '</div>')
+                : (head + body);
+  });
+  $('groups').innerHTML = html.join('');
 }
 
 function renderDone(view) {
@@ -2367,11 +2535,24 @@ function stepperRow(label, key, value, lo, hi, note) {
 // ---- Settings → Sort tasks by ---------------------------------------------
 const SORT_LABELS = [['due', 'Due date'], ['priority', 'Priority first'],
                      ['urgency', 'Urgency'], ['manual', 'Manual']];
+// The "Group by" pair (api.md round 7): a SEPARATE preference from the four
+// rows above (prefs.sort.group_by, not prefs.sort.mode), in the same
+// switchRow/prefrow style and the same card rather than a segmented control
+// like the widget's own Group by -- this card already IS a list of rows.
+const GROUP_BY_LABELS = [['due', 'Due date'], ['category', 'Category']];
 function renderSortEditor() {
   const m = sortMode();
+  const gb = prefs.sort.group_by;
   setHTML('sortEditor', SORT_LABELS.map(
     r => switchRow(r[0] === m, r[1], 'data-sort="' + esc(r[0]) + '"',
-                   r[0] === 'manual' ? 'drag to arrange' : '')).join(''));
+                   r[0] === 'manual' ? 'drag to arrange' : '')).join('') +
+    // A plain (non-button) .prefrow: same look as the rows around it, but
+    // inert -- see the CSS -- so the two switch pairs above and below it read
+    // as two different questions rather than six mutually exclusive options.
+    '<div class="prefrow" style="cursor:default"><span class="pname">Group by</span></div>' +
+    GROUP_BY_LABELS.map(
+      r => switchRow(r[0] === gb, r[1], 'data-groupby="' + esc(r[0]) + '"',
+                     r[0] === 'category' ? 'drag a section to reorder' : '')).join(''));
 }
 
 // ---- Settings → Categories -------------------------------------------------
@@ -2635,6 +2816,9 @@ function measureBars() {
   const qa = $('quickadd');
   const h = qa.hidden ? 0 : qa.offsetHeight;
   document.documentElement.style.setProperty('--qah', h + 'px');
+  const fab = $('fabAdd');
+  const fh = fab.hidden ? 0 : fab.offsetHeight + 16;   // + its own clearance
+  document.documentElement.style.setProperty('--fabh', fh + 'px');
 }
 
 // ===========================================================================
@@ -3141,6 +3325,116 @@ function endCatDrag() {
   putPrefs(p => { p.categories.order = after; });
 }
 
+// ---------------------------------------------------------------------------
+// reorder by dragging (Tasks list, category SECTIONS, prefs.sort.group_by =
+// "category", api.md round 7)
+// ---------------------------------------------------------------------------
+// A third copy of the same small drag -- see the comment above catDrag for
+// why this is not a generalisation of the other two. What moves here is a
+// WHOLE SECTION, header and its `.list` together, which is why renderCategor-
+// ySections() wraps each one (except "No category") in a single `.catsection`
+// element: wrapped that way, "swap with the neighbour the finger has passed"
+// is the exact same algorithm as the task-row and category-row drags above,
+// just one level up the DOM. "No category" carries no .catsection class, so
+// the neighbour checks below -- which only ever swap past an element THAT HAS
+// the class -- can never move a section past it or move it at all.
+let secDrag = null;
+function secIds(list) {
+  return Array.prototype.map.call(list.querySelectorAll('.catsection'),
+                                  el => el.getAttribute('data-cat'));
+}
+function startSecDrag(section, ev) {
+  if (!section || secDrag) return;
+  const list = section.parentElement;
+  if (!list) return;
+  secDrag = {
+    row: section, list: list, id: ev.pointerId,
+    // PAGE coordinates -- see startDrag above for why.
+    startY: ev.clientY + window.scrollY,
+    lastY: ev.clientY,
+    before: secIds(list),
+    raf: 0
+  };
+  section.classList.add('dragging');
+  document.body.classList.add('dragging');
+  try { ev.target.setPointerCapture(ev.pointerId); } catch (e) { /* not fatal */ }
+  secDrag.raf = requestAnimationFrame(secDragTick);
+}
+function secDragTick() {
+  if (!secDrag) return;
+  // A section is much taller than a row; nothing may rebuild #groups under a
+  // finger mid-drag, same reasoning as dragTick() above.
+  holdRender(1000);
+  const h = window.innerHeight;
+  let dv = 0;
+  if (secDrag.lastY < DRAG_EDGE) dv = -Math.ceil((DRAG_EDGE - secDrag.lastY) / 5);
+  else if (secDrag.lastY > h - DRAG_EDGE) dv = Math.ceil((secDrag.lastY - (h - DRAG_EDGE)) / 5);
+  if (dv) window.scrollBy(0, dv);
+  secDragMove();
+  secDrag.raf = requestAnimationFrame(secDragTick);
+}
+function secDragMove() {
+  const d = secDrag;
+  if (!d) return;
+  for (let guard = 0; guard < 30; guard++) {
+    const next = d.row.nextElementSibling;
+    if (next && next.classList.contains('catsection')) {
+      const r = next.getBoundingClientRect();
+      if (d.lastY > r.top + r.height / 2) {
+        d.list.insertBefore(next, d.row);
+        d.startY += r.height;
+        continue;
+      }
+    }
+    const prev = d.row.previousElementSibling;
+    if (prev && prev.classList.contains('catsection')) {
+      const r = prev.getBoundingClientRect();
+      if (d.lastY < r.top + r.height / 2) {
+        d.list.insertBefore(d.row, prev);
+        d.startY -= r.height;
+        continue;
+      }
+    }
+    break;
+  }
+  d.row.style.transform = 'translateY(' + ((d.lastY + window.scrollY) - d.startY) + 'px)';
+}
+function endSecDrag() {
+  const d = secDrag;
+  if (!d) return;
+  secDrag = null;
+  if (d.raf) cancelAnimationFrame(d.raf);
+  d.row.style.transform = '';
+  d.row.classList.remove('dragging');
+  document.body.classList.remove('dragging');
+  renderHold = 0;
+  const after = secIds(d.list);
+  if (after.join() === d.before.join()) { render(); return; }  // no move -> no write
+  commitSectionOrder(after);
+}
+// The on-screen order -> the FULL prefs.categories.order (api.md round 7):
+// start from allCategories() (the complete list, including anything hidden or
+// with nothing pending right now), pull the on-screen categories out of it,
+// and reinsert them -- in the order just dragged -- at the index the first of
+// them occupied before the drag. `at` is necessarily the smallest index among
+// the on-screen categories, so every category before it in `full` is already
+// off-screen and the same count of them sits before the dragged block in
+// `rest` -- which is what makes "insert at `at`" correct without adjusting it
+// for the ones just removed. A category not on screen today keeps its
+// relative place among the other categories not on screen; it is not
+// reinterleaved with the dragged ones (that would need a merge this simple
+// rule does not attempt).
+function commitSectionOrder(after) {
+  const onScreen = after.filter(Boolean);   // '' (No category) never drags
+  if (!onScreen.length) { render(); return; }
+  const full = allCategories();
+  const at = Math.min.apply(null, onScreen.map(c => full.indexOf(c)).filter(i => i >= 0));
+  const rest = full.filter(c => onScreen.indexOf(c) === -1);
+  const insertAt = isFinite(at) ? Math.min(at, rest.length) : rest.length;
+  const next = rest.slice(0, insertAt).concat(onScreen, rest.slice(insertAt));
+  putPrefs(p => { p.categories.order = next; });
+}
+
 // ---- quick add ------------------------------------------------------------
 // A tap on Add is answered three ways: the button presses (#qaAdd:active), the
 // field clears, and the row that appears is washed with --flash for ~0.9 s so
@@ -3400,16 +3694,30 @@ function quickAdd() {
 let shTags = [];        // the tag set being edited
 let shPriority = '';
 let shTask = null;
+// True while the sheet is open in the "+" button's NEW-TASK mode
+// (openNewTaskSheet(), round 7): there is no backing task yet, so sheetUuid
+// stays '' and currentTask('') finds nothing -- every place that used to ask
+// "is there a sheetUuid" to mean "is a sheet open" has to ask this too. See
+// route(), openSheet() and closeSheet().
+let sheetIsNew = false;
 
 function openSheet(uuid) {
   const t = currentTask(uuid);
   if (!t) { toast('That task is gone.', { bad: true }); go('#/tasks'); return; }
+  sheetIsNew = false;
   shTask = t; sheetUuid = uuid;
   shTags = (t.tags || []).slice();
   shPriority = t.priority || '';
 
   $('shTitle').textContent = t.status === 'completed' ? 'Completed task' : 'Task';
   $('shDesc').value = t.description || '';
+  // Undo whatever NEW-TASK mode hid or relabelled last time the sheet was in
+  // it -- this path does not rely on openNewTaskSheet() to have put them
+  // back, in case something else ever opens an existing task straight over a
+  // draft.
+  $('shDelete').hidden = false;
+  $('shNotesBlock').hidden = false;
+  $('shSave').textContent = 'Save';
 
   // The same list the quick-add chip offers, including this task's own category
   // when it is the only thing using it -- see categoryList().
@@ -3445,7 +3753,55 @@ function openSheet(uuid) {
 }
 function closeSheet() {
   $('sheet').hidden = true;
+  sheetUuid = ''; shTask = null; sheetIsNew = false;
+}
+
+// ---- the "+" button: the same sheet, in NEW-TASK mode (round 7) -----------
+// Feature 1. Nothing is created until Save (sheetSaveNew() below), so there is
+// no task to hand openSheet() -- this fills the same fields by hand, with the
+// defaults design.md D13/D6 call for, and flips the three things that only
+// make sense once a task exists: Delete (nothing to delete yet), Notes
+// (annotating needs a saved uuid, api.md "Annotate"), and the Save label.
+function openNewTaskSheet() {
+  sheetIsNew = true;
   sheetUuid = ''; shTask = null;
+  shTags = [];
+  shPriority = '';
+
+  $('shTitle').textContent = 'New task';
+  $('shDesc').value = '';
+
+  // Preselected to the quick-add bar's sticky category, or the active
+  // category filter when one is on (design.md D13, qaCategoryValue()) -- the
+  // same rule quickAdd() itself uses, so the "+" button and the quick-add bar
+  // never disagree about where an untouched new task would land.
+  const cat = qaCategoryValue();
+  $('shProject').innerHTML =
+    '<option value="">— none —</option>' +
+    categoryList(cat).map(p => '<option value="' + esc(p) + '"' +
+      (p === cat ? ' selected' : '') + '>' + esc(p) + '</option>').join('') +
+    '<option value="__new__">New category…</option>';
+  $('shNewProject').hidden = true;
+  $('shNewProject').value = '';
+
+  paintPriority();
+
+  $('shDate').value = '';
+  $('shTime').value = '';
+
+  // fillRecur() reads t.recur/t.until; a task that does not exist yet has
+  // never repeated.
+  fillRecur({ recur: null, until: null });
+  paintSheetTags();
+
+  $('shFoot').textContent = '';
+  $('shDelete').hidden = true;
+  $('shNotesBlock').hidden = true;
+  $('shSave').textContent = 'Add';
+
+  $('sheet').hidden = false;
+  $('sheetInner').scrollTop = 0;
+  $('shDesc').focus();
 }
 // ---- repeat (api.md, "Recurrence") ----------------------------------------
 // The period belongs to the recurring TEMPLATE. Editing it from an instance is
@@ -3510,6 +3866,7 @@ function paintAnnos(t) {
 }
 
 function sheetSave() {
+  if (sheetIsNew) { sheetSaveNew(); return; }
   if (!sheetUuid || !shTask) return;
   const t = shTask;
   const body = {};
@@ -3577,6 +3934,91 @@ function sheetSave() {
   toast('Saved');
 }
 
+// sheetSave()'s NEW-TASK branch (round 7). Validated exactly the same way --
+// description required, CAT_RE + lower-casing for a typed category, a repeat
+// needs a due date, a custom repeat must match RECUR_RE -- then created
+// through the SAME path quickAdd() uses: a queued `add` with a tmp-… uuid and
+// an optimistic row (design.md D6), sent with the Create fields the contract
+// allows (api.md, "Create") -- description, project, priority, due, tags.
+//
+// Repeat is not a Create field, so a chosen one is a `patch {recur}` enqueued
+// right behind the add, against the SAME tmp uuid. That is safe already, not
+// just here: `enqueue`/`drain`/`rewriteId` were read for this feature and the
+// ordering holds --
+//   1. queue is one shared array and drain() only ever sends queue[0],
+//      shifting it off before moving to the next -- ops leave in the order
+//      they arrived.
+//   2. drain() sets `draining = true` SYNCHRONOUSLY, before its first
+//      `await`. enqueue() fires syncNow() (drain(); refresh()) after every
+//      push without awaiting it, so the add's enqueue() starts a drain that
+//      claims `draining` before this function's very next line runs; the
+//      patch's own enqueue() calls drain() again but finds `draining` already
+//      true and returns immediately, leaving the one running drain() loop as
+//      the only thing sending either op.
+//   3. When the add's response comes back, rewriteId(tmp, real) runs
+//      synchronously -- no `await` inside it -- and rewrites `op.uuid` on
+//      EVERY op still in the queue, including the patch sitting right behind
+//      it, before the loop advances. The patch is popped only after that, so
+//      it is always sent addressed to the real uuid.
+// This is not new: sheetSave() above already patches a tmp- uuid when editing
+// a task whose add has not landed yet (see the comment on rewriteId()) --
+// this is the same mechanism, just with both ops queued back to back by one
+// Save instead of by two separate visits to the sheet.
+function sheetSaveNew() {
+  const desc = $('shDesc').value.trim();
+  if (!desc) { toast('A task needs a description.', { bad: true }); return; }
+
+  let project = $('shProject').value;
+  if (project === '__new__') {
+    // Same rule and same lower-casing as every other category entry point
+    // (quick-add's picker, the edit sheet) -- one category, not two chips
+    // that look alike, and never an op the server drops with a 422.
+    const typed = $('shNewProject').value.trim();
+    if (typed && !CAT_RE.test(typed)) { toast(CAT_RULE, { bad: true }); return; }
+    project = typed.toLowerCase();
+  }
+  project = project || null;
+
+  const priority = shPriority || null;
+  const due = joinDue($('shDate').value || '', $('shTime').value || '');
+
+  let recur = $('shRecur').value;
+  if (recur === '__custom__') {
+    recur = $('shRecurCustom').value.trim().toLowerCase();
+    if (!RECUR_RE.test(recur)) { toast(RECUR_RULE, { bad: true }); return; }
+  }
+  if (recur && !due) { toast('A repeating task needs a due date.', { bad: true }); return; }
+
+  const uuid = tmpId();
+  const body = { description: desc };
+  if (project) body.project = project;
+  if (priority) body.priority = priority;
+  if (due) body.due = due;
+  if (shTags.length) body.tags = shTags.slice();
+
+  // The row the user sees until the server answers -- a complete Task shape,
+  // exactly like quickAdd()'s, so every renderer works on it without a
+  // special case for "not sent yet".
+  const task = {
+    uuid: uuid, description: desc, status: 'pending', project: project,
+    priority: priority, due: due, due_at: null, tags: shTags.slice(),
+    annotations: [], recur: null, parent: null, depends: [], blocked: false,
+    urgency: 5, entry: new Date().toISOString(), modified: new Date().toISOString(),
+    end: null
+  };
+  flashRow(uuid);
+  enqueue({ kind: 'add', uuid: uuid, body: body, task: task });
+  // Queued immediately after, against the same tmp uuid -- see the ordering
+  // proof above. The row's own `recur` stays null until the patch lands and
+  // mergeServerTask() folds the answer in; drain() also toasts "Now
+  // repeating…" at that point (see drain()'s patch branch), so nothing here
+  // has to.
+  if (recur) enqueue({ kind: 'patch', uuid: uuid, body: { recur: recur } });
+
+  closeSheet();
+  go('#/tasks');
+}
+
 // ===========================================================================
 // router
 // ===========================================================================
@@ -3588,6 +4030,7 @@ function show(name) {
   current = name;
   SCREENS.forEach(s => { $('scr-' + s).hidden = (s !== name); });
   $('quickadd').hidden = (name !== 'tasks');
+  $('fabAdd').hidden = (name !== 'tasks');
   $('tabTasks').className = name === 'tasks' ? 'on' : '';
   $('tabDone').className = name === 'done' ? 'on' : '';
   $('tabSettings').className = name === 'settings' ? 'on' : '';
@@ -3602,16 +4045,23 @@ function route() {
   // A drag that outlives the screen it started on would drop a row into a list
   // that is no longer painted.
   if (drag) endDrag();
+  if (secDrag) endSecDrag();
   // The category picker is not a route (it is a chip's menu, not a screen), so
   // nothing else would take it down when the screen moves out from under it.
   closeCatPicker();
   const parts = (location.hash || '').replace(/^#\/?/, '').split('/').filter(Boolean);
+  // The "+" sheet (openNewTaskSheet(), round 7) is not a route either -- a
+  // brand new task has no uuid to route to -- so sheetUuid stays '' while it
+  // is open and every closeSheet() guard below has to also ask sheetIsNew, or
+  // navigating away while it is open would leave it painted over whatever
+  // screen just came in (exactly what sheetUuid alone already prevents for
+  // the edit sheet).
   switch (parts[0]) {
     case 'done':
-      if (sheetUuid) closeSheet();
+      if (sheetUuid || sheetIsNew) closeSheet();
       show('done'); render(); refresh(true); break;
     case 'settings':
-      if (sheetUuid) closeSheet();
+      if (sheetUuid || sheetIsNew) closeSheet();
       show('settings'); fillSettings(); render();
       // The four editors down there are the server's own document and the
       // category list behind them is /api/meta's, so both are asked for when
@@ -3627,7 +4077,7 @@ function route() {
       break;
     case 'tasks':
     default:
-      if (sheetUuid) closeSheet();
+      if (sheetUuid || sheetIsNew) closeSheet();
       show('tasks'); render(); break;
   }
 }
@@ -3674,7 +4124,15 @@ $('groups').addEventListener('pointerdown', ev => {
   const h = ev.target.closest('.draghandle');
   if (!h) return;
   ev.preventDefault();
-  startDrag(h.closest('.task'), ev);
+  // Two different things carry a .draghandle inside #groups: a task row
+  // (reorder mode, sort.mode=manual) and a category SECTION header
+  // (sort.group_by=category, api.md round 7) -- closest() tells them apart,
+  // since a task row's own handle is inside a .task that is in turn inside
+  // the section's .list.
+  const taskEl = h.closest('.task');
+  if (taskEl) { startDrag(taskEl, ev); return; }
+  const secEl = h.closest('.catsection');
+  if (secEl) startSecDrag(secEl, ev);
 });
 document.addEventListener('pointermove', ev => {
   if (!drag || ev.pointerId !== drag.id) return;
@@ -3690,6 +4148,20 @@ document.addEventListener('pointerup', ev => {
 // left mid-drag with the list frozen behind it.
 document.addEventListener('pointercancel', ev => {
   if (drag && ev.pointerId === drag.id) endDrag();
+});
+
+// ---- reorder (Tasks list -> category sections) -----------------------
+document.addEventListener('pointermove', ev => {
+  if (!secDrag || ev.pointerId !== secDrag.id) return;
+  ev.preventDefault();
+  secDrag.lastY = ev.clientY;
+  secDragMove();
+}, { passive: false });
+document.addEventListener('pointerup', ev => {
+  if (secDrag && ev.pointerId === secDrag.id) endSecDrag();
+});
+document.addEventListener('pointercancel', ev => {
+  if (secDrag && ev.pointerId === secDrag.id) endSecDrag();
 });
 
 // ---- reorder (Settings -> Categories) --------------------------------
@@ -3742,6 +4214,7 @@ $('qaText').addEventListener('keydown', ev => {
   // without the keyboard ever closing.
   if (ev.key === 'Enter') { ev.preventDefault(); quickAdd(); }
 });
+$('fabAdd').addEventListener('click', openNewTaskSheet);
 
 $('shClose').addEventListener('click', () => { closeSheet(); go('#/tasks'); });
 $('sheet').addEventListener('click', ev => {
@@ -3868,17 +4341,29 @@ $('setRetry').addEventListener('click', () => syncNow(false));
 // hold a reference to an element inside one.
 $('sortEditor').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-sort]');
-  if (!b) return;
-  const mode = b.getAttribute('data-sort');
-  if (mode === sortMode()) return;
-  putPrefs(p => { p.sort.mode = mode; }).then(ok => {
-    if (!ok) return;
-    if (mode !== 'manual') reorderMode = false;
-    // The ORDER of the list is the server's answer and it has just changed, so
-    // the cached one is wrong and its ETag would answer 304 to the question.
-    etag = ''; lsDel(K.etag);
-    refresh(true);
-  });
+  if (b) {
+    const mode = b.getAttribute('data-sort');
+    if (mode === sortMode()) return;
+    putPrefs(p => { p.sort.mode = mode; }).then(ok => {
+      if (!ok) return;
+      if (mode !== 'manual') reorderMode = false;
+      // The ORDER of the list is the server's answer and it has just changed,
+      // so the cached one is wrong and its ETag would answer 304 to the
+      // question.
+      etag = ''; lsDel(K.etag);
+      refresh(true);
+    });
+    return;
+  }
+  const g = ev.target.closest('button[data-groupby]');
+  if (g) {
+    const gb = g.getAttribute('data-groupby');
+    if (gb === prefs.sort.group_by) return;
+    // Purely how THIS SCREEN sections the same list (api.md round 7) -- the
+    // server's own order is untouched, so unlike sort.mode above this needs
+    // no etag bust or refetch, just a re-render.
+    putPrefs(p => { p.sort.group_by = gb; });
+  }
 });
 $('catEditor').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-act]');

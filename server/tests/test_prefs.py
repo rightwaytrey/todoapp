@@ -11,7 +11,7 @@ DEFAULTS = {
     "chips": {"order": ["p:personal", "p:work", "p:claude", "p:fun", "p:inbox",
                         "t:claude", "t:alert"],
               "hidden": []},
-    "sort": {"mode": "due"},
+    "sort": {"mode": "due", "group_by": "due"},
     "widget": {"groups": ["overdue", "today"], "upcoming_days": 7,
                "category": None, "rows": {"small": 3, "medium": 5, "large": 12},
                "show_category": False, "group_by": "due"},
@@ -30,7 +30,7 @@ async def test_put_replaces_and_round_trips(client):
     body = {
         "categories": {"order": ["work", "personal"], "hidden": ["inbox"]},
         "chips": {"order": ["p:work", "t:alert"], "hidden": ["p:fun"]},
-        "sort": {"mode": "manual"},
+        "sort": {"mode": "manual", "group_by": "category"},
         "widget": {"groups": ["overdue", "today", "upcoming"],
                    "upcoming_days": 3, "category": "work",
                    "rows": {"small": 2, "medium": 4, "large": 20},
@@ -45,7 +45,8 @@ async def test_put_replaces_and_round_trips(client):
 async def test_put_fills_every_missing_section_with_its_default(client):
     r = await client.put("/api/prefs", json={"sort": {"mode": "urgency"}})
     body = r.json()
-    assert body["sort"] == {"mode": "urgency"}
+    # `group_by` is missing from the body entirely — round 7: reads as "due".
+    assert body["sort"] == {"mode": "urgency", "group_by": "due"}
     assert body["categories"] == DEFAULTS["categories"]
     assert body["chips"] == DEFAULTS["chips"]
     assert body["widget"] == DEFAULTS["widget"]
@@ -110,6 +111,9 @@ BAD = [
     ("widget", {"widget": {"group_by": "Category"}}),    # not case-folded
     ("widget", {"widget": {"group_by": 3}}),
     ("widget", {"widget": {"group_by": None}}),
+    ("sort.group_by", {"sort": {"group_by": "project"}}),   # round 7: due|category
+    ("sort.group_by", {"sort": {"group_by": "Category"}}),  # not case-folded
+    ("sort.group_by", {"sort": {"group_by": 3}}),
 ]
 
 
@@ -136,6 +140,18 @@ async def test_group_by_defaults_to_due_and_takes_category(client):
     r = await client.put("/api/prefs", json={"widget": {"group_by": "category"}})
     assert r.json()["widget"]["group_by"] == "category"
     assert json.loads(settings.prefs_path.read_text())["widget"]["group_by"] \
+        == "category"
+
+
+async def test_sort_group_by_defaults_to_due_and_takes_category(client):
+    """Round 7. A document with no `group_by` under `sort` — the shape every
+    prefs file before round 7 has — keeps sectioning the phone's list by due
+    date. Separate from (and not to be confused with) `widget.group_by`."""
+    assert (await client.get("/api/prefs")).json()["sort"]["group_by"] == "due"
+
+    r = await client.put("/api/prefs", json={"sort": {"group_by": "category"}})
+    assert r.json()["sort"]["group_by"] == "category"
+    assert json.loads(settings.prefs_path.read_text())["sort"]["group_by"] \
         == "category"
 
 

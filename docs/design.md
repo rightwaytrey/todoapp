@@ -52,8 +52,9 @@ uninstalled on day one.
 ## D2 — No filters. One list, grouped.
 
 The Tasks screen shows **every pending task**, grouped: Overdue, Today,
-Upcoming (by due date), No date. Nothing is hidden by a filter, so nothing has to
-be tagged to appear. Done is a second tab (last 30 days, tap to un-complete).
+Upcoming (by due date), No date — or, since 2026-09-14, one section per
+category (D17; the due label and the overdue colour stay on every row either
+way). Nothing is hidden by a filter, so nothing has to be tagged to appear. Done is a second tab (last 30 days, tap to un-complete).
 That is the entire information architecture. Projects, priority and tags are
 shown on the row and edited in the detail sheet; they are never a gate on
 visibility.
@@ -484,6 +485,10 @@ The **check box is unchanged** (D10): it completes, with the three-second
 undo; the words beside it edit. A tap has to mean exactly one thing, and D10's
 cancel depends on the second tap landing on the same box.
 
+*Corrected the same day:* the "plus for adding tasks" in that request meant a
+**+ in the app**, not on the widget — see D17. The widget's + stays as a
+shortcut into the app's add path; it was not what was asked for.
+
 **The small widget gets neither link.** `Link` is only interactive in the
 medium and large families; in `.systemSmall` the whole widget is one tap
 target (`.widgetURL`), and a "+" that does nothing is worse than none. Small
@@ -504,6 +509,48 @@ widget (there is nothing to type into).
 **Shipping:** the widget half is Swift, so a store build; the client half is
 a bundle (D11) and is safe on an older shell, because nothing older sends the
 URLs.
+
+## D17 — A "+" in the app, and a list grouped by category whose sections drag
+
+*Added 2026-09-14, after D16 missed the point: "The plus should be in the
+app, not on the widget … I don't see any rearrangement on the widget or in the
+app."* Asked back, the answer was: categories rearrangeable **in the Tasks
+list**, and the + opening the **full task sheet**.
+
+**The +.** A floating button at the bottom right of the Tasks tab, above the
+quick-add bar, opens the detail sheet in a *New task* mode: description,
+category (preset to the quick-add's sticky choice, D13), priority, due date
+and time, repeat, tags. Save creates through the same queued `add` op as
+quick-add (D6), so it is optimistic and works offline; a repeat is not a
+Create field (api.md), so it is queued as a `patch` behind the add and
+`rewriteId()` carries it to the real uuid. Notes are hidden until the task
+exists. The quick-add bar stays: it is still the fastest capture; the + is
+for the task that needs more than a line.
+
+**Category sections.** `prefs.sort.group_by` (api.md round 7): `"due"` — the
+D2 sections, unchanged — or `"category"`: one section per category with a
+pending task, in `prefs.categories.order`, then the never-arranged ones
+alphabetically, then *No category* last; rows inside keep the server's
+canonical order (D8/D14) and their due labels. **Dragging a section header
+writes the whole `categories.order` back** — the same document Settings →
+Categories writes, so the picker, the chips' categories and the widget's
+category runs (D14) all follow at once, with nothing to reconcile (D15).
+*No category* is pinned last. Manual task ordering still works inside a
+section: the midpoint is taken between the row's neighbours there, and
+`order` stays one global number.
+
+**Why a preference and not a mode switch on the screen:** the choice is a
+way of reading the list, not a filter (D9), and it belongs with the sort mode
+it modifies — the same Settings card. It lives on the server because the
+order it produces is the one the widget draws (D15). **Ruled out:** grouping
+the widget by the same switch (it has its own `widget.group_by`, and the
+home screen and the phone can reasonably want different readings); category
+sections inside the due groups (two levels of header on a 6.1" screen, and
+nothing left to drag); dragging categories on the widget (WidgetKit has no
+drag).
+
+Client and server change; no native change, so it ships as a bundle (D11)
+plus `systemctl --user restart`.
 
 ## Out of scope for v1 (build together later)
 

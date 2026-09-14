@@ -214,13 +214,21 @@ supported — there is no cache, so the next request picks it up:
 {
   "categories": {"order": ["personal","work","claude","fun","inbox"], "hidden": []},
   "chips":      {"order": ["p:personal","p:work","t:claude","t:alert"], "hidden": []},
-  "sort":       {"mode": "due"},
+  "sort":       {"mode": "due", "group_by": "due"},
   "widget":     {"groups": ["overdue","today"], "upcoming_days": 7,
                  "category": null,
                  "rows": {"small": 3, "medium": 5, "large": 12},
                  "show_category": false, "group_by": "due"}
 }
 ```
+
+`sort.group_by` (round 7) is `"due"` (default) or `"category"`: whether the
+phone's own task list is sectioned Overdue/Today/Upcoming/No date, or into one
+section per category in `categories.order` then the rest alphabetically then
+No category last. It is validated exactly like `widget.group_by` — the two
+values, no case-folding, `422` naming `sort.group_by` otherwise — but it is a
+separate setting: it sections the phone's list, not what the home-screen
+widget draws, and setting one does not change the other.
 
 Writes are atomic (a sibling `.tmp`, then one `rename`), so a reader sees the
 old document or the new one and never half of one. A file that will not parse —

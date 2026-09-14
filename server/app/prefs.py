@@ -40,9 +40,11 @@ TAG_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 
 SORT_MODES = ("due", "priority", "urgency", "manual")
 GROUPS = ("overdue", "today", "upcoming", "none")
-# What the widget's rows are grouped by (docs/api.md round 6). "due" is what
-# round 5 did and stays the default: a widget that regroups itself the moment
-# the server learns a new word would be a surprise on someone's home screen.
+# What a list of tasks is grouped by. Shared by two independent settings that
+# happen to share a domain: the widget's own rows (`widget.group_by`, docs/api.md
+# round 6) and, since round 7, the phone's task list (`sort.group_by`). "due" is
+# what round 5 did and stays the default for both: a list that regroups itself
+# the moment the server learns a new word would be a surprise on someone's screen.
 GROUP_BYS = ("due", "category")
 
 # The two tags the filter bar offers (docs/design.md D9) — the default chip row
@@ -126,12 +128,26 @@ class SortPrefs(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     mode: str = "due"
+    # How the phone's list is sectioned (docs/api.md round 7) — independent of
+    # the widget's own `widget.group_by`: one screen, one home-screen glance,
+    # two settings so choosing one never surprises the other.
+    group_by: str = "due"
 
     @field_validator("mode")
     @classmethod
     def v_mode(cls, v):
         if not isinstance(v, str) or v.strip() not in SORT_MODES:
             raise ValueError("must be one of %s" % ", ".join(SORT_MODES))
+        return v.strip()
+
+    # Same strictness as WidgetPrefs.v_group_by: no case-folding, because
+    # folding "Category" to "category" here would silently accept a client
+    # bug that folding it in WidgetPrefs would still reject.
+    @field_validator("group_by")
+    @classmethod
+    def v_group_by(cls, v):
+        if not isinstance(v, str) or v.strip() not in GROUP_BYS:
+            raise ValueError("must be one of %s" % ", ".join(GROUP_BYS))
         return v.strip()
 
 
