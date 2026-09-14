@@ -58,8 +58,23 @@
 //  timeline reads them so a redraw mid-grace keeps the check mark on. Nothing
 //  else is written locally and nothing is read back — WidgetKit reloads this
 //  widget's timeline when the intent returns, and the next fetch is the account
-//  of record. A tap anywhere ELSE still opens the app (.widgetURL); the two
-//  coexist.
+//  of record.
+//
+//  A tap anywhere ELSE still opens the app, and now that is three things, all
+//  coexisting. The header's "+" is a Link to taskmaster://add. In
+//  .systemMedium/.systemLarge a row's words — everything but the Toggle box —
+//  are a Link to taskmaster://task/<uuid>, so that tap opens the app on that
+//  one task instead of just on Today. Everything neither Link covers still
+//  falls through to .widgetURL(taskmaster://today) at the bottom of body().
+//  Neither Link is drawn in .systemSmall: Link is only interactive in
+//  .systemMedium/.systemLarge, the whole widget is ONE tap target there
+//  (.widgetURL again), and a Link that can never fire would be a control that
+//  does nothing — worse than no control at all. The app routes all three in
+//  www/index.html's handleDeepLink (design.md D16): taskmaster://add lands on
+//  the Tasks screen with the quick-add field focused, taskmaster://task/<uuid>
+//  opens that task's sheet, and taskmaster://today lands on the top of the
+//  list — which is where a plain launch goes anyway, so that one would work
+//  with no handler at all.
 //
 //  Deployment target is iOS 17.0 — THIS TARGET ONLY. The app stays at 15.0, and
 //  scripts/add_widget_target.rb is what sets the floor, so re-run it after any
@@ -820,6 +835,22 @@ private let kHeaderSize: CGFloat = 10
 private let kHeaderAbove: CGFloat = 4
 private let kHeaderBelow: CGFloat = 2
 
+/// The header's "+" glyph. Its own constant for the same reason kSymbolSize
+/// is one: "about 17 pt" is a specific claim, not a value shared with
+/// anything else already in the file.
+private let kAddSize: CGFloat = 17
+
+/// A `taskmaster://<path>` URL for a Link's destination. Link, unlike
+/// .widgetURL at the bottom of body(), takes a non-Optional URL — and
+/// URL(string:) is Optional regardless of how safe the input looks. "add" is
+/// a literal and a uuid is exactly the characters a URL path segment allows
+/// (api.md), so this has never actually failed in practice; the two call
+/// sites below treat a nil here as "draw no Link" rather than force-unwrap
+/// one on faith.
+private func widgetLink(_ path: String) -> URL? {
+    return URL(string: "taskmaster://" + path)
+}
+
 /// How a row's Toggle draws: an empty circle that becomes a filled green check.
 ///
 /// A style, rather than drawing the two states inline, because an intent-backed
@@ -890,6 +921,53 @@ struct TaskMasterWidgetView: View {
         return "updated " + agoLabel(updated)
     }
 
+    /// The words in a row: the description, the optional "· category", the
+    /// spacer, and the due label — everything in the row except the Toggle
+    /// box. Its own method because rowBody() below now draws this two ways,
+    /// plain or wrapped in a Link, and the pieces, their fonts and their
+    /// colours must be identical either way.
+    ///
+    /// "Water the plants · work", drawn when the server sent a category and
+    /// the list is NOT grouped by one. Grouped, the header over this run has
+    /// just said the word, and repeating it on every row is noise the
+    /// description would be truncated to pay for.
+    ///
+    /// A separate Text rather than one interpolated string because the two
+    /// halves are different sizes and colours, and because the DESCRIPTION is
+    /// the half that gives way: it is the only flexible view in this row, so
+    /// SwiftUI hands the fixedSize ones their ideal width and truncates it,
+    /// which is the wanted order — the category is a word, and half a word
+    /// says nothing.
+    ///
+    /// frame(maxWidth: .infinity) is new: it is what makes a Link wrapped
+    /// around this fill the row instead of hugging its content, the way a
+    /// Link's label otherwise does. The Spacer inside was already pushing the
+    /// due label to the far edge of whatever contained it; the frame is what
+    /// carries that same behaviour through when the container is a Link.
+    private func rowWords(_ row: TodayRow, showCategory: Bool) -> some View {
+        return HStack(spacing: 4) {
+            Text(row.text)
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if showCategory {
+                Text("· " + row.category)
+                    .font(.system(size: 11))
+                    .foregroundColor(.gray)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            Spacer(minLength: 4)
+            // fixedSize so a long description truncates and the due label never
+            // does — the label is the point.
+            Text(row.due)
+                .font(.system(size: 11))
+                .foregroundColor(row.overdue ? .red : .gray)
+                .fixedSize()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
     /// One row: the tap target, the description, the due label.
     ///
     /// Its own method rather than an inline closure in body(). A Toggle with an
@@ -914,49 +992,40 @@ struct TaskMasterWidgetView: View {
         // the three pieces on that box is what actually lines up.
         return HStack(alignment: .center, spacing: 4) {
             // The box IS the control (design.md D10), and it is still no bigger
-            // than a tap needs: everything around it is the .widgetURL below,
-            // so a near-miss opens the app. What changed is the cost of a miss
-            // that LANDS — it now takes a second tap within three seconds to
-            // undo, instead of having completed a task nobody meant to complete.
+            // than a tap needs: everything around it is a Link or a
+            // .widgetURL, so a near-miss opens the app. What changed is the
+            // cost of a miss that LANDS — it now takes a second tap within
+            // three seconds to undo, instead of having completed a task
+            // nobody meant to complete.
             //
             // WidgetKit sets `value` on the intent to the state the tap
             // produced before performing it; passing the same thing here costs
             // nothing, and makes the row say out loud what a tap on it means.
             Toggle(isOn: armed, intent: CompleteTaskIntent(uuid: row.id, value: !armed)) {
                 // No label: the description next door is NOT part of the tap
-                // target and must not become part of it — see above.
+                // target and must not become part of it — see above. That is
+                // true whether the description sits there plain or inside a
+                // Link: the Link starts after this Toggle, never inside it.
                 EmptyView()
             }
             .toggleStyle(CheckToggleStyle(offColor: row.overdue ? .red : .gray))
-            Text(row.text)
-                .font(.system(size: 13))
-                .lineLimit(1)
-                .truncationMode(.tail)
-            // "Water the plants · work", drawn when the server sent a category
-            // and the list is NOT grouped by one. Grouped, the header over this
-            // run has just said the word, and repeating it on every row is noise
-            // the description would be truncated to pay for.
-            //
-            // A separate Text rather than one interpolated string because
-            // the two halves are different sizes and colours, and because the
-            // DESCRIPTION is the half that gives way: it is the only flexible
-            // view in this row, so SwiftUI hands the fixedSize ones their ideal
-            // width and truncates it, which is the wanted order — the category
-            // is a word, and half a word says nothing.
-            if showCategory {
-                Text("· " + row.category)
-                    .font(.system(size: 11))
-                    .foregroundColor(.gray)
-                    .lineLimit(1)
-                    .fixedSize()
+            // .systemSmall draws the words exactly as before: no Link, because
+            // Link is not interactive there — the whole widget is one
+            // .widgetURL tap target in .systemSmall (file header), and a Link
+            // drawn but unable to ever fire would be worse than none. Medium
+            // and large wrap the words in a Link to the task, so a tap opens
+            // the app on THIS task; widgetLink returning nil — never, in
+            // practice, a uuid is always URL-safe — draws the plain words
+            // instead of a Link to nowhere.
+            if family == .systemSmall {
+                rowWords(row, showCategory: showCategory)
+            } else if let taskURL = widgetLink("task/" + row.id) {
+                Link(destination: taskURL) {
+                    rowWords(row, showCategory: showCategory)
+                }
+            } else {
+                rowWords(row, showCategory: showCategory)
             }
-            Spacer(minLength: 4)
-            // fixedSize so a long description truncates and the due label never
-            // does — the label is the point.
-            Text(row.due)
-                .font(.system(size: 11))
-                .foregroundColor(row.overdue ? .red : .gray)
-                .fixedSize()
         }
     }
 
@@ -1047,6 +1116,18 @@ struct TaskMasterWidgetView: View {
                 Text(String(entry.total))
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.gray)
+                // Medium/large only — see the file header. .systemSmall draws
+                // neither this nor a row Link, because Link is not
+                // interactive there at all: the whole widget is one
+                // .widgetURL tap target, and a "+" that could never fire
+                // would be a control that does nothing.
+                if family != .systemSmall, let addURL = widgetLink("add") {
+                    Link(destination: addURL) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: kAddSize))
+                            .foregroundColor(.gray)
+                    }
+                }
             }
             .padding(.bottom, 6)
 
@@ -1070,10 +1151,11 @@ struct TaskMasterWidgetView: View {
                 .foregroundColor(.gray)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        // Tapping anywhere opens the app. The app does not have to HANDLE the
-        // URL — iOS launches it on the scheme alone — but the scheme has to be
-        // registered in the APP's Info.plist (CFBundleURLTypes) or the tap does
-        // nothing at all.
+        // The fallback: everywhere the two Links above do not cover, tapping
+        // still opens the app, on Today. The app does not have to HANDLE this
+        // one URL — iOS launches it on the scheme alone — but the scheme has
+        // to be registered in the APP's Info.plist (CFBundleURLTypes) or every
+        // tap on this widget, this fallback included, does nothing at all.
         .widgetURL(URL(string: "taskmaster://today"))
         .modifier(WidgetContainerBackground())
     }

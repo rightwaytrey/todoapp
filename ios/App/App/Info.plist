@@ -27,16 +27,24 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 
-	<!-- The `taskmaster` scheme exists for ONE reason: the home-screen widget's
-	     .widgetURL("taskmaster://today") (ios/App/TaskMasterWidget/, design.md
-	     D7). Tapping a widget opens the URL it declares, and iOS will not open
-	     it unless the scheme is registered here — the tap just does nothing.
+	<!-- The `taskmaster` scheme exists for the home-screen widget's three URLs
+	     (ios/App/TaskMasterWidget/TaskMasterWidget.swift, design.md D7):
+	     .widgetURL("taskmaster://today") on the whole widget, and, in
+	     .systemMedium/.systemLarge only, a Link on the header's "+"
+	     (taskmaster://add) and a Link on a row's words
+	     (taskmaster://task/<uuid>). iOS will not open any of the three unless
+	     the scheme is registered here — a tap just does nothing.
 
-	     The app deliberately does not HANDLE the URL. Launching is the whole
-	     feature; the app opens on the Tasks screen, which is where the tap was
-	     going anyway. Capacitor's SceneDelegate already forwards
-	     openURLContexts to the bridge, so if a deep link is ever wanted
-	     (#/task/<uuid> from a widget row) there is nothing to wire up first.
+	     The app routes all three in www/index.html's handleDeepLink (design.md
+	     D16): taskmaster://add lands on the Tasks screen with the quick-add
+	     field focused, taskmaster://task/<uuid> opens that task's sheet, and
+	     taskmaster://today lands on the top of the list — which is also where
+	     a plain launch goes, so that one would work with no handler at all.
+	     Capacitor's SceneDelegate forwards openURLContexts —
+	     and, for a cold launch (the app not already running),
+	     connectionOptions.urlContexts — to the bridge, which is what makes
+	     handleDeepLink reachable from a tap that also has to launch the app
+	     first.
 
 	     Bare `taskmaster`, not the reverse-DNS `org.rightwaytrey.taskmaster`
 	     that carpool registers: nothing outside this app and its own extension

@@ -638,13 +638,17 @@
   .task.buttonrow { position: relative; }
   .task.buttonrow .draghandle { position: absolute; top: 2px; right: 2px; margin: 0; }
   .task.buttonrow.hashandle .taskbody { padding-right: 46px; }
-  .task.dragging {
+  /* .prefrow centers its children (unlike .task, which top-aligns for
+     multi-line rows), so the handle there does not want .task's 5px nudge. */
+  .prefrow .draghandle { margin-top: 0; }
+  .task.dragging, .prefrow.dragging {
     position: relative; z-index: 6; background: var(--card);
     box-shadow: var(--shadow); border-radius: 10px; cursor: grabbing;
   }
-  .task.dragging .draghandle { color: var(--accent); }
-  /* .list clips its corners, which would also clip a row lifted out of it. */
-  body.dragging .list { overflow: visible; }
+  .task.dragging .draghandle, .prefrow.dragging .draghandle { color: var(--accent); }
+  /* .list and .prefs both clip their corners, which would also clip a row
+     lifted out of them. */
+  body.dragging .list, body.dragging .prefs { overflow: visible; }
   body.dragging { user-select: none; -webkit-user-select: none; }
   #btnReorder.on { color: var(--accent); background: var(--card2); }
 
@@ -1898,6 +1902,11 @@ async function putPrefs(mutate, okMsg) {
     prefs = normPrefs(r.data && typeof r.data === 'object' ? r.data : next);
     lsSet(K.prefs, JSON.stringify(prefs));
     prefsEverLoaded = true;
+    // /api/meta's `categories` is the server's copy of the order and the
+    // hidden flags just written, and it is what the Categories editor and
+    // both pickers are built from (allCategories). Without this an arrow or a
+    // drag lands on the server at once and on this screen at the next poll.
+    await loadMeta();
     if (okMsg) toast(okMsg);
     return true;
   } catch (err) {
@@ -2371,6 +2380,16 @@ function catCount(name) {
   if (c && typeof c.count === 'number') return c.count;
   return project().pend.filter(t => t.project === name).length;
 }
+// The one thing on a category row that starts a drag (see startCatDrag,
+// below). Same look as the task list's handle (.draghandle) -- placed before
+// the name rather than inside .pacts, so a sixth control does not widen the
+// already-full-width arrows/Hide/Rename/Delete cluster past a 390pt screen.
+function catDragHandle(name) {
+  return '<button class="draghandle" data-act="drag" data-key="' + esc(name) +
+    '" aria-label="Reorder ' + esc(name) + '">' +
+    '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path d="M4 7h16M4 12h16M4 17h16"/></svg></button>';
+}
 function renderCatEditor() {
   const names = allCategories();
   if (!names.length) {
@@ -2382,7 +2401,9 @@ function renderCatEditor() {
     const hidden = isHiddenCat(name);
     const n = catCount(name);
     const note = n + (n === 1 ? ' task' : ' tasks') + (hidden ? ' · hidden' : '');
-    return '<div class="prefrow' + (hidden ? ' off' : '') + '">' +
+    return '<div class="prefrow' + (hidden ? ' off' : '') + '" data-cat="' +
+      esc(name) + '">' +
+      catDragHandle(name) +
       '<span class="pname">' + esc(name) +
         '<span class="pnote">' + esc(note) + '</span></span>' +
       '<span class="pacts">' +
@@ -3035,6 +3056,91 @@ function commitReorder(movedUuid, uuids) {
   if (!changes.length) render();
 }
 
+// ---------------------------------------------------------------------------
+// reorder by dragging (Settings -> Categories)
+// ---------------------------------------------------------------------------
+// A small separate drag rather than a generalisation of the task list's
+// (above): that one is tied to `.task`/`.list` closely enough -- data-group
+// scoping (a task may only move inside its due-date group), the 1.2 s grace
+// via isArmed/cancelArm, the `order` UDA math in commitReorder -- that bending
+// it to a flat list of .prefrow elements would be more surface area to break
+// than to share. Same gesture (a handle, pointer events, autoscroll, the
+// .dragging classes) and the same drop rule: the arrows are the accessible
+// path (catEditorAct), so a drop writes exactly what a tap on an arrow writes
+// -- the WHOLE order list, via putPrefs -- and nothing else.
+let catDrag = null;
+function catRowIds(list) {
+  return Array.prototype.map.call(list.querySelectorAll('.prefrow'),
+                                  el => el.getAttribute('data-cat'));
+}
+function startCatDrag(row, ev) {
+  if (!row || catDrag) return;
+  const list = row.parentElement;
+  if (!list) return;
+  catDrag = {
+    row: row, list: list, id: ev.pointerId,
+    // PAGE coordinates -- see startDrag above for why.
+    startY: ev.clientY + window.scrollY,
+    lastY: ev.clientY,
+    before: catRowIds(list),
+    raf: 0
+  };
+  row.classList.add('dragging');
+  document.body.classList.add('dragging');
+  try { ev.target.setPointerCapture(ev.pointerId); } catch (e) { /* not fatal */ }
+  catDrag.raf = requestAnimationFrame(catDragTick);
+}
+function catDragTick() {
+  if (!catDrag) return;
+  const h = window.innerHeight;
+  let dv = 0;
+  if (catDrag.lastY < DRAG_EDGE) dv = -Math.ceil((DRAG_EDGE - catDrag.lastY) / 5);
+  else if (catDrag.lastY > h - DRAG_EDGE) dv = Math.ceil((catDrag.lastY - (h - DRAG_EDGE)) / 5);
+  if (dv) window.scrollBy(0, dv);
+  catDragMove();
+  catDrag.raf = requestAnimationFrame(catDragTick);
+}
+function catDragMove() {
+  const d = catDrag;
+  if (!d) return;
+  for (let guard = 0; guard < 30; guard++) {
+    const next = d.row.nextElementSibling;
+    if (next && next.classList.contains('prefrow')) {
+      const r = next.getBoundingClientRect();
+      if (d.lastY > r.top + r.height / 2) {
+        d.list.insertBefore(next, d.row);
+        d.startY += r.height;
+        continue;
+      }
+    }
+    const prev = d.row.previousElementSibling;
+    if (prev && prev.classList.contains('prefrow')) {
+      const r = prev.getBoundingClientRect();
+      if (d.lastY < r.top + r.height / 2) {
+        d.list.insertBefore(d.row, prev);
+        d.startY -= r.height;
+        continue;
+      }
+    }
+    break;
+  }
+  d.row.style.transform = 'translateY(' + ((d.lastY + window.scrollY) - d.startY) + 'px)';
+}
+function endCatDrag() {
+  const d = catDrag;
+  if (!d) return;
+  catDrag = null;
+  if (d.raf) cancelAnimationFrame(d.raf);
+  d.row.style.transform = '';
+  d.row.classList.remove('dragging');
+  document.body.classList.remove('dragging');
+  const after = catRowIds(d.list);
+  if (after.join() === d.before.join()) { render(); return; }  // no move -> no write
+  // Exactly what the arrows write (see the comment above moveInList): the
+  // WHOLE list, including any category the server has not heard of yet.
+  putPrefs(p => { p.categories.order = after; });
+}
+
 // ---- quick add ------------------------------------------------------------
 // A tap on Add is answered three ways: the button presses (#qaAdd:active), the
 // field clears, and the row that appears is washed with --flash for ~0.9 s so
@@ -3586,6 +3692,28 @@ document.addEventListener('pointercancel', ev => {
   if (drag && ev.pointerId === drag.id) endDrag();
 });
 
+// ---- reorder (Settings -> Categories) --------------------------------
+// Same event shape as the task list's above, kept as its own set of
+// listeners rather than folded into those -- see the comment above catDrag.
+$('catEditor').addEventListener('pointerdown', ev => {
+  const h = ev.target.closest('.draghandle');
+  if (!h) return;
+  ev.preventDefault();
+  startCatDrag(h.closest('.prefrow'), ev);
+});
+document.addEventListener('pointermove', ev => {
+  if (!catDrag || ev.pointerId !== catDrag.id) return;
+  ev.preventDefault();
+  catDrag.lastY = ev.clientY;
+  catDragMove();
+}, { passive: false });
+document.addEventListener('pointerup', ev => {
+  if (catDrag && ev.pointerId === catDrag.id) endCatDrag();
+});
+document.addEventListener('pointercancel', ev => {
+  if (catDrag && ev.pointerId === catDrag.id) endCatDrag();
+});
+
 $('filterbar').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-f]');
   if (b) setFilter(b.getAttribute('data-f'));
@@ -3857,6 +3985,68 @@ function openedFromWidget(why) {
   syncNow(true);
 }
 
+// Puts the keyboard in the quick-add field. Split out of handleDeepLink
+// because it has to run after #quickadd is actually unhidden -- see there.
+function focusQuickAdd() {
+  const el = $('qaText');
+  if (!el) return;
+  el.focus();
+  try { el.select(); } catch (e) { /* nothing typed yet to select */ }
+}
+
+// The one place a taskmaster:// URL becomes a screen. Top-level and safe to
+// call with any string, so it can be driven from a browser console
+// (handleDeepLink('taskmaster://add')) for testing, and so wireNativeHooks()
+// below has exactly one thing to call from both appUrlOpen and a cold-launch
+// getLaunchUrl().
+function handleDeepLink(url) {
+  url = String(url || '');
+  if (url.indexOf('taskmaster://') !== 0) return;   // not ours
+  const parts = url.slice('taskmaster://'.length).split('/').filter(Boolean);
+
+  // taskmaster://add -- the widget's + button. Same landing as a plain tap,
+  // then the keyboard.
+  if (parts.length === 1 && parts[0] === 'add') {
+    openedFromWidget(url);
+    if (current === 'tasks') {
+      focusQuickAdd();
+    } else {
+      // go() above may have just changed location.hash; if so #quickadd
+      // stays hidden until the 'hashchange' it causes runs route(), which is
+      // a separate task from this one -- not something already done by the
+      // time openedFromWidget() returns. route()'s own listener was added at
+      // load time, long before this one, so it always runs first and unhides
+      // #quickadd before this fires.
+      window.addEventListener('hashchange', focusQuickAdd, { once: true });
+    }
+    return;
+  }
+
+  // taskmaster://task/<uuid> -- a widget row. Open the sheet, syncing first
+  // if this phone does not have the task yet.
+  if (parts[0] === 'task' && parts[1]) {
+    const uuid = decodeURIComponent(parts[1]);
+    const target = '#/task/' + encodeURIComponent(uuid);
+    if (currentTask(uuid)) { go(target); return; }
+    // Not in the local store yet: the widget's own copy can be up to 15
+    // minutes stale (D8), and a task created moments ago elsewhere may not
+    // have reached this phone's cache at all. syncNow() is `async`, so
+    // calling it hands back a real promise -- open the sheet once THAT
+    // settles rather than guessing at a delay or polling for one. If the
+    // task is still missing afterwards, go(target) runs the existing
+    // #/task route, whose openSheet() already toasts "That task is gone."
+    // and returns to the list -- nothing extra needed here.
+    go('#/tasks');
+    // Land on the route either way: a sync that failed still gets the
+    // existing "That task is gone." toast and the list, not nowhere.
+    syncNow(true).then(() => go(target), () => go(target));
+    return;
+  }
+
+  // taskmaster://today and everything else not recognised above: unchanged.
+  openedFromWidget(url);
+}
+
 let hiddenAt = 0;        // when the app went to the background; 0 if it has not
 function wireNativeHooks() {
   const app = capPlugin('App');
@@ -3864,6 +4054,36 @@ function wireNativeHooks() {
     console.log('[app] no App plugin - widget deep link off, visibility fallback on');
     return;
   }
+
+  // Cold launch: iOS hands the widget's URL to getLaunchUrl(), and
+  // @capacitor/app MAY ALSO replay it through appUrlOpen once a listener is
+  // attached -- it retains the native open-URL notification until something
+  // is listening to consume it (AppPlugin.swift: handleUrlOpened calls
+  // notifyListeners(..., retainUntilConsumed: true)), so both can resolve for
+  // the very same launch. dispatchLaunchUrl() remembers whichever gets there
+  // first; the second delivery of that identical url is the replay and is
+  // dropped. This only guards the FIRST appUrlOpen this listener ever sees
+  // (sawFirstUrlOpen below) -- a genuine later tap on the same link (say
+  // "today" twice in one session) is not a cold-launch replay and is handled
+  // every time.
+  let launchUrlDispatched = null;
+  function dispatchLaunchUrl(url) {
+    if (launchUrlDispatched !== null && url === launchUrlDispatched) return;
+    launchUrlDispatched = url;
+    if (url) handleDeepLink(url);
+  }
+  if (typeof app.getLaunchUrl === 'function') {
+    try {
+      Promise.resolve(app.getLaunchUrl()).then(
+        res => dispatchLaunchUrl((res && res.url) || ''),
+        e => console.log('[app] getLaunchUrl rejected: ' + ((e && e.message) || e))
+      );
+    } catch (e) {
+      console.log('[app] getLaunchUrl threw: ' + ((e && e.message) || e));
+    }
+  }
+
+  let sawFirstUrlOpen = false;
   if (typeof app.addListener === 'function') {
     try {
       app.addListener('appUrlOpen', ev => {
@@ -3871,7 +4091,8 @@ function wireNativeHooks() {
         // Only our own scheme. Universal links and anything else the OS hands
         // over are somebody else's business and must not move the screen.
         if (url.indexOf('taskmaster://') !== 0) return;
-        openedFromWidget(url);
+        if (!sawFirstUrlOpen) { sawFirstUrlOpen = true; dispatchLaunchUrl(url); return; }
+        handleDeepLink(url);
       });
     } catch (e) {
       console.log('[app] appUrlOpen listener failed: ' + ((e && e.message) || e));

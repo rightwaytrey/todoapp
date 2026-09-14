@@ -180,8 +180,8 @@ hooks and is nobody's dependency here — D1).
 **Future work**, in the order it would be worth doing: an App Group so the app
 can hand the widget its cached list and its Settings server URL — one
 entitlement, one signed-archive workflow change, and the widget stops needing
-the network at all; then a deep link so a row opens `#/task/<uuid>` instead of
-just launching the app.
+the network at all; ~~then a deep link so a row opens `#/task/<uuid>` instead of
+just launching the app~~ — **built 2026-09-14, D16.**
 
 
 ## D8 — One canonical order, shared by the app and the widget
@@ -430,7 +430,9 @@ task per day.
 *Added 2026-09-04.* One JSON document at `~/.config/taskmaster/prefs.json`,
 read and written through `GET`/`PUT /api/prefs`: category order and hidden
 categories, the filter chip row, the sort mode, and everything about the
-widget. The phone, the widget and the server all read the same file, so there
+widget. (Category order is edited under Settings → Categories with the ↑/↓
+arrows or, since 2026-09-14, by pressing and dragging a row; either path writes
+the whole `categories.order` list back, the way the arrows always have.) The phone, the widget and the server all read the same file, so there
 is no sync problem to have — the same argument as D1, one layer up. A setting
 changed on the Settings screen is in effect on the home screen at the widget's
 next refresh, with nothing to push and nothing to reconcile.
@@ -460,6 +462,48 @@ setting, and a configuration UI that only reaches the widget — the phone's own
 Settings screen would still need its own copy of every value. One JSON file
 does all of it and can be edited with `$EDITOR` when something is wrong at
 07:00.
+
+## D16 — Into the app from the widget: "+" to add, tap a row to edit
+
+*Added 2026-09-14, from "can I get a plus for adding tasks … and editable on
+the widget".*
+
+A widget cannot edit text: WidgetKit gives an extension toggles and buttons
+(iOS 17) and nothing that takes typing. So "editable on the widget" means
+**one tap from the widget to the right field in the app**, and the mechanism
+is the URL scheme the app already registers (`taskmaster://`, D7) — no
+entitlement, no App Group, the unsigned archive untouched. Three URLs:
+
+| Where the tap lands | URL | The app opens on |
+|---|---|---|
+| the **+** in the header | `taskmaster://add` | the Tasks tab with the quick-add field focused |
+| a row's **words** (description, category, due label) | `taskmaster://task/<uuid>` | that task's edit sheet |
+| anywhere else | `taskmaster://today` | the top of the Tasks tab, as before |
+
+The **check box is unchanged** (D10): it completes, with the three-second
+undo; the words beside it edit. A tap has to mean exactly one thing, and D10's
+cancel depends on the second tap landing on the same box.
+
+**The small widget gets neither link.** `Link` is only interactive in the
+medium and large families; in `.systemSmall` the whole widget is one tap
+target (`.widgetURL`), and a "+" that does nothing is worse than none. Small
+opens the list, as it always has.
+
+**The app does the routing**, in `handleDeepLink()` in `www/index.html`: it is
+the only place that knows the three forms. A warm app hears the URL through
+Capacitor's `appUrlOpen`; a cold launch reads it back with `getLaunchUrl()`,
+guarded so one launch is never routed twice. A task the phone has not fetched
+yet is fetched first and the sheet opened when it lands; one that no longer
+exists gets the existing "That task is gone." toast and the list.
+
+**Ruled out:** an App Intent that opens the app (a Capacitor shell receives
+no intents, and an intent cannot say *where* to open — the URL can); making
+the check box open the sheet (see above); a "+" that adds a task *on* the
+widget (there is nothing to type into).
+
+**Shipping:** the widget half is Swift, so a store build; the client half is
+a bundle (D11) and is safe on an older shell, because nothing older sends the
+URLs.
 
 ## Out of scope for v1 (build together later)
 
