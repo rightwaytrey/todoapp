@@ -242,7 +242,9 @@ async def test_a_slipped_series_shows_its_overdue_instance_only(client):
         [("water plants", "overdue", True)]
 
 
-async def test_completing_the_shown_instance_reveals_the_next(client):
+async def test_a_ticked_daily_task_is_gone_until_tomorrow(client):
+    """Ticking today's instance must not surface tomorrow's under Upcoming —
+    that is exactly what the rider saw on 2026-10-08 after the first cut."""
     await put_prefs(client, widget=ALL_GROUPS)
     t = await make(client, "feed cats", due=day(0))
     await client.patch("/api/tasks/%s" % t["uuid"], json={"recur": "daily"})
@@ -250,9 +252,18 @@ async def test_completing_the_shown_instance_reveals_the_next(client):
     assert shown["due"] == "today"
     r = await client.post("/api/tasks/%s/done" % shown["uuid"])
     assert r.status_code == 200, r.text
+    assert (await feed(client))["rows"] == []
+
+
+async def test_a_recurring_instance_never_shows_under_upcoming(client):
+    """Not only dailies: a weekly chore due in three days waits for its day,
+    while a plain task due the same day is still upcoming."""
+    await put_prefs(client, widget=ALL_GROUPS)
+    t = await make(client, "bins out", due=day(3))
+    await client.patch("/api/tasks/%s" % t["uuid"], json={"recur": "weekly"})
+    await make(client, "dentist", due=day(3))
     rows = (await feed(client))["rows"]
-    assert [(r["text"], r["due"]) for r in rows] == [("feed cats", "Tomorrow")]
-    assert rows[0]["uuid"] != shown["uuid"]
+    assert [r["text"] for r in rows] == ["dentist"]
 
 
 async def test_total_counts_the_collapsed_series_once(client):

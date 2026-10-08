@@ -26,7 +26,8 @@ Round 10 (2026-10-08) draws a recurring series **once**: Taskwarrior keeps
 tomorrow's instance pending next to today's (`recurrence.limit=1` generates
 one instance *ahead*, verified on 3.4.2), and with `upcoming` on the widget
 showed a daily chore twice. `one_per_series()` keeps the earliest pending
-instance of each template and drops the rest.
+instance of each template and drops the rest, and a recurring instance is
+never drawn under `upcoming`: a chore appears on its day, not the day before.
 """
 from __future__ import annotations
 
@@ -169,6 +170,12 @@ async def widget_feed(request: Request):
             continue
         if t["group"] == "upcoming" and horizon is not None \
                 and (t["due"] or "")[:10] > horizon:
+            continue
+        # Round 10: a recurring chore is not something to plan for, it is
+        # something to do when its day comes — and Taskwarrior always keeps
+        # the next instance pending, so without this every daily task would
+        # sit under Upcoming the moment today's is ticked.
+        if t["group"] == "upcoming" and t.get("parent"):
             continue
         if wp.category and t["project"] != wp.category:
             continue

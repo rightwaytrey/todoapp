@@ -606,7 +606,9 @@ Recurrence note), so with `upcoming` enabled the widget drew "feed cats"
 twice, and three times once it had slipped a day. The feed now keeps only the
 **earliest pending instance** of each template (`parent`) and drops the rest
 before the group/horizon/category filters run, so `total` counts the series
-once. Completing the shown instance reveals the next. Plain tasks and
+once. A recurring instance is also **never sent under `upcoming`** (only
+`overdue` / `today`): ticking today's instance must not surface tomorrow's,
+which is what the first cut did an hour after shipping. Plain tasks and
 orphaned instances (template deleted) are unaffected, and `/api/tasks` is
 **not** collapsed — every pending task stays on the Tasks screen.
 

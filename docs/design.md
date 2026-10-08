@@ -446,7 +446,10 @@ that aren't due today")*: Taskwarrior 3.4.2 on the default
 one, so a daily chore is two pending tasks every day and three once it has
 slipped. With Settings → Widget → Upcoming on, the widget drew all of them.
 The feed now draws a series as its earliest pending instance only
-(`one_per_series()`, api.md round 10); ticking it reveals the next. The Tasks
+(`one_per_series()`, api.md round 10), and never under Upcoming at all: the
+first cut collapsed the pair, and the moment today's was ticked tomorrow's
+became the earliest and sat under Upcoming — "it's showing tomorrow's daily
+tasks again". A recurring chore appears on the widget on its day. The Tasks
 screen is deliberately **not** collapsed: every pending task is on it (D2),
 and the upcoming copy is what the rider edits when they want tomorrow's to
 differ. **Ruled out:** turning Upcoming off (loses every plain task due this
