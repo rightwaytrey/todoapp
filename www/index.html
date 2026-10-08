@@ -778,11 +778,16 @@
   <p class="prefhint">
     The server puts the list in this order and both this app and the
     home-screen widget show what it sends (design.md D8). <b>Manual</b> adds a
-    reorder handle to the Tasks screen. <b>Group by Category</b> sections the
-    Tasks list by category instead of by due date — drag a section's handle to
-    reorder categories, which reorders them here and on the widget too. The
-    home-screen widget groups its rows the same way as this switch now, not a
-    separate one of its own.
+    reorder handle to the Tasks screen.
+  </p>
+
+  <h2 class="group">Group by</h2>
+  <div class="seg" id="groupEditor" style="margin-top:8px"></div>
+  <p class="prefhint">
+    <b>Category</b> sections the Tasks list by category instead of by due
+    date — drag a section's handle to reorder categories, which reorders them
+    here and on the widget too. The home-screen widget groups its rows the
+    same way.
   </p>
 
   <h2 class="group">Categories</h2>
@@ -2512,8 +2517,10 @@ function stepperRow(label, key, value, lo, hi, note) {
 const SORT_LABELS = [['due', 'Due date'], ['priority', 'Priority first'],
                      ['urgency', 'Urgency'], ['manual', 'Manual']];
 // The "Group by" pair (api.md round 7): a SEPARATE preference from the four
-// rows above (prefs.sort.group_by, not prefs.sort.mode), in the same
-// switchRow/prefrow style and the same card. Round 8: this is the ONLY
+// rows above (prefs.sort.group_by, not prefs.sort.mode). It has its own
+// heading and a segmented switch, not more tick rows in the Sort card: drawn
+// as six ticks in one card it read as one list with two answers ticked and
+// "Due date" in it twice (2026-10-08). Round 8: this is the ONLY
 // Group-by control left in Settings -- picking one writes prefs.widget.
 // group_by to match too (see the click handler below), so the Widget card
 // does not carry a second switch that can disagree with this one.
@@ -2523,14 +2530,11 @@ function renderSortEditor() {
   const gb = prefs.sort.group_by;
   setHTML('sortEditor', SORT_LABELS.map(
     r => switchRow(r[0] === m, r[1], 'data-sort="' + esc(r[0]) + '"',
-                   r[0] === 'manual' ? 'drag to arrange' : '')).join('') +
-    // A plain (non-button) .prefrow: same look as the rows around it, but
-    // inert -- see the CSS -- so the two switch pairs above and below it read
-    // as two different questions rather than six mutually exclusive options.
-    '<div class="prefrow" style="cursor:default"><span class="pname">Group by</span></div>' +
-    GROUP_BY_LABELS.map(
-      r => switchRow(r[0] === gb, r[1], 'data-groupby="' + esc(r[0]) + '"',
-                     r[0] === 'category' ? 'drag a section to reorder' : '')).join(''));
+                   r[0] === 'manual' ? 'drag to arrange' : '')).join(''));
+  setHTML('groupEditor', GROUP_BY_LABELS.map(
+    r => '<button class="' + (r[0] === gb ? 'on' : '') + '" data-groupby="' +
+         esc(r[0]) + '" aria-pressed="' + (r[0] === gb) + '">' + esc(r[1]) +
+         '</button>').join(''));
 }
 
 // ---- Settings → Categories -------------------------------------------------
@@ -4208,6 +4212,8 @@ $('sortEditor').addEventListener('click', ev => {
     });
     return;
   }
+});
+$('groupEditor').addEventListener('click', ev => {
   const g = ev.target.closest('button[data-groupby]');
   if (g) {
     const gb = g.getAttribute('data-groupby');
