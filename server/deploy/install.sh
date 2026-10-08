@@ -103,6 +103,15 @@ else
   echo "                 chmod 600 $ENV_FILE && systemctl --user restart $SERVICE"
 fi
 
+# Two users (docs/api.md round 9, design.md D19) need nothing from this
+# script: the server itself writes $TASKMASTER_STORES/<name>/ and shared/
+# (default ~/.local/share/taskmaster, each with a hooks=off taskrc) at startup
+# once TASKMASTER_USERS is in the env file. Put that line in BEFORE the second
+# phone installs — an unmapped phone is the default user and sees your list.
+if [ -r "$ENV_FILE" ] && grep -q '^TASKMASTER_USERS=' "$ENV_FILE"; then
+  echo "    TASKMASTER_USERS is set -- multi-user; stores under ${TASKMASTER_STORES:-$HOME/.local/share/taskmaster}"
+fi
+
 echo "==> 4/5  systemd USER service ($SERVICE)"
 if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
   echo "    NOTE: lingering is off, so this will not start at boot."

@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -242,25 +243,29 @@ class Prefs(BaseModel):
 # --------------------------------------------------------------------------- #
 # the file
 # --------------------------------------------------------------------------- #
-def load() -> Prefs:
+def load(path: Optional[Path] = None) -> Prefs:
     """The stored document, or the defaults. Never raises.
 
     A file the user hand-edited into nonsense is logged once per read and then
     ignored, which is noisier than caching it and quieter than a 500 on every
     poll of the task list.
+
+    `path` is the caller's own file since round 9 (docs/api.md "Prefs are per
+    user"): `stores.User.prefs_path`. None is the default user's,
+    `settings.prefs_path`, which is the only file there is in single-user mode.
     """
+    path = path or settings.prefs_path
     try:
-        raw = json.loads(settings.prefs_path.read_text())
+        raw = json.loads(path.read_text())
     except FileNotFoundError:
-        return Prefs()
+        return _defaults(path)
     except (OSError, ValueError) as exc:
         log.warning("prefs at %s are unreadable (%s) — using defaults",
-                    settings.prefs_path, exc)
-        return Prefs()
+                    path, exc)
+        return _defaults(path)
     if not isinstance(raw, dict):
-        log.warning("prefs at %s are not a JSON object — using defaults",
-                    settings.prefs_path)
-        return Prefs()
+        log.warning("prefs at %s are not a JSON object — using defaults", path)
+        return _defaults(path)
     try:
         return Prefs.model_validate(raw)
     except Exception as exc:                                     # noqa: BLE001
@@ -268,11 +273,26 @@ def load() -> Prefs:
         # problem: it means the file was written by hand or by an older
         # version. Fall back rather than break every request that reads it.
         log.warning("prefs at %s did not validate (%s) — using defaults",
-                    settings.prefs_path, exc)
+                    path, exc)
         return Prefs()
 
 
-def save(prefs: Prefs) -> Prefs:
+def _defaults(path: Path) -> Prefs:
+    """The document a user who has never saved one gets.
+
+    The default user's is the class defaults: the five `pa` categories and
+    their chips, the vocabulary the rest of `pa` is built on (design.md D13).
+    Any other user's file (round 9) starts with an EMPTY category order and
+    chip order: those five are the default user's categories, and listing
+    them for her — meta and the widget feed both walk `categories.order` —
+    would put four zero-count chips she never made on her screen.
+    """
+    if path == settings.prefs_path:
+        return Prefs()
+    return Prefs(categories=CategoryPrefs(order=[]), chips=ChipPrefs(order=[]))
+
+
+def save(prefs: Prefs, path: Optional[Path] = None) -> Prefs:
     """Write the document atomically. Returns what was written.
 
     Same shape as scripts/publish_bundle.py's manifest write: a sibling `.tmp`
@@ -281,13 +301,14 @@ def save(prefs: Prefs) -> Prefs:
     filesystem, which is why the temp file is a sibling and not in /tmp.
     """
     with _LOCK:
-        return _write(prefs)
+        return _write(prefs, path)
 
 
-def _write(prefs: Prefs) -> Prefs:
-    """The write itself. Callers hold _LOCK."""
+def _write(prefs: Prefs, path: Optional[Path] = None) -> Prefs:
+    """The write itself. Callers hold _LOCK. One lock for every user's file:
+    the writes are a few hundred bytes and there are two people."""
     body = json.dumps(prefs.model_dump(), indent=2, sort_keys=True) + "\n"
-    path = settings.prefs_path
+    path = path or settings.prefs_path
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(body)
@@ -295,7 +316,7 @@ def _write(prefs: Prefs) -> Prefs:
     return prefs
 
 
-def update(**sections: Any) -> Prefs:
+def update(path: Optional[Path] = None, **sections: Any) -> Prefs:
     """Read-modify-write one or more top-level sections, under the lock.
 
     Used by the category endpoints, which rewrite `categories` and `chips`
@@ -303,9 +324,9 @@ def update(**sections: Any) -> Prefs:
     their own read and write.
     """
     with _LOCK:
-        current = load().model_dump()
+        current = load(path).model_dump()
         current.update(sections)
-        return _write(Prefs.model_validate(current))
+        return _write(Prefs.model_validate(current), path)
 
 
 def as_json(prefs: Prefs) -> Dict[str, Any]:

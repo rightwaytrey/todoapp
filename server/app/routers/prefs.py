@@ -11,27 +11,29 @@ need a merge rule per section for no gain.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from .. import prefs as store
+from .. import stores
 from ..prefs import Prefs
 
 router = APIRouter(tags=["prefs"])
 
 
 @router.get("/prefs")
-async def get_prefs():
+async def get_prefs(request: Request):
     """The stored document with every default filled in.
 
     Never 404 and never 500: a box with no file yet answers with the defaults,
     which is what makes "first launch" and "already configured" the same code
     path on the client.
     """
-    return store.as_json(store.load())
+    # Per user since round 9: the caller's own file (stores.User.prefs_path).
+    return store.as_json(store.load(stores.caller(request).prefs_path))
 
 
 @router.put("/prefs")
-async def put_prefs(body: Prefs):
+async def put_prefs(request: Request, body: Prefs):
     """Validate, fill defaults, write atomically, answer with what was stored.
 
     Answering with the stored document rather than `204` is deliberate: the
@@ -39,4 +41,4 @@ async def put_prefs(body: Prefs):
     will read, so a dropped unknown key or a defaulted section is visible at
     once instead of at the next launch.
     """
-    return store.as_json(store.save(body))
+    return store.as_json(store.save(body, stores.caller(request).prefs_path))

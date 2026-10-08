@@ -672,3 +672,155 @@ when the intent returns; the next `GET /api/widget` is the account of record.
 Nothing else moves: rename and delete already move `widget.category`
 (Categories, above), and the phone's Settings → Widget → Category shows the
 same value the chips set.
+
+### Two users, a shared store (2026-10-08, round 9)
+
+*Planner's contract, written before either side changed. From "let's think
+about multiple users and how we can share tasks and categories between
+users" → "private plus shared, her phone is on the tailnet". design.md D19 has
+the reasoning; this section is the wire.*
+
+**Who is calling is decided by the client address**, never by a header. The
+env file (`~/.config/taskmaster/env`, outside the repo) carries
+
+```
+TASKMASTER_USERS="trey=100.64.1.2,100.64.1.3;partner=100.64.1.9"
+```
+
+`name=addr[,addr…]` entries separated by `;`. Names match
+`^[a-z][a-z0-9_]{0,15}$`; `shared` is reserved. **The first entry is the
+default user**, whose private store is the ambient `TASKRC`/`TASKDATA` the
+server has always run against (`~/.task`, the hooks, `pa` — all unchanged).
+An address in the map is that user, loopback included; loopback and any
+address not in the map resolve to the default user, so a box with the
+variable unset, or a phone not yet mapped, sees exactly what it sees today. With the variable unset there is no shared store at all and the
+server is single-user, byte for byte as before. Why the address and not a
+token: the widget sends no `Authorization` header and the updater cannot
+(Access, above), and D4 already trusts the tailnet address as the gate.
+
+**Stores.** Each non-default user gets `$TASKMASTER_STORES/<name>/`
+(default `~/.local/share/taskmaster`) holding `taskrc`, `data/` and
+`prefs.json`; the shared store is `$TASKMASTER_STORES/shared/` holding
+`taskrc`, `data/` and `categories.json`. The server writes any missing
+`taskrc` at startup — `data.location`, `hooks=off`, the `order` UDA — and
+passes `TASKRC`/`TASKDATA` to the `task` child for that store exactly as the
+tests do, with `rc.hooks=off` on the argv as well. 3.4.2 looks for hooks
+under `TASKDATA`, and those stores have none, so nothing in them reaches
+`pa-pushnow`, retag or the Scriptable feed. The default user's prefs stay at
+`$TASKMASTER_PREFS`. A malformed map — a bad name, `shared`, a non-address,
+one address under two names, a name twice — **stops the service from
+starting** and says why in the journal: a lenient parse would quietly make her
+phone an unmapped address, which is you.
+
+**The Task object gains `"shared": true|false`** — which store it lives in;
+always present, `false` throughout in single-user mode, so the client sees one
+shape. Likewise `categories[].shared` in meta.
+
+**`GET /api/tasks`** returns the caller's private store and the shared store
+merged: pending half sorted by the canonical order across both (`order` is a
+plain number, so manual midpoints work across the merge), `group` as before,
+completed half the last 30 days across both. The ETag is over the merged
+body. **`GET /api/widget`** is the same merge under the caller's own prefs.
+
+**Every uuid path** (`GET`/`PATCH`/`DELETE /api/tasks/{uuid}`, `/done`,
+`/undone`, `/annotate`) resolves the uuid in the caller's private store
+first, then the shared store. A uuid that is in neither — including one in
+*another* user's private store — is `404`, never `403`. If the same uuid is
+found in both (a move that failed between its import and its purge, below),
+the shared copy wins and the stale private one is purged on the spot.
+
+**`POST /api/tasks`** goes to the shared store when `project` is a shared
+category, else to the caller's private store. A task with no category is
+private. There is no `shared` field on Create or Update: the category *is* the
+sharing decision (design.md D19).
+
+**`PATCH` of `project` across the boundary moves the task** — private to
+shared when the new category is shared, shared to private when it is not —
+with the uuid, annotations, tags, due, priority and `order` intact. Verified
+on 3.4.2 in a throwaway pair of stores: `task export` → `task import` in the
+other store keeps the uuid and every field; `task <uuid> delete` then
+`task <uuid> purge` leaves the source with no record of it; the same uuid can
+be imported back later. The import reads the JSON on stdin (`task import
+-`), argv-only; the new `project` is written into the imported record, so the
+move and the category change are one step. Order of operations is import,
+delete, purge; a failure after the import is a `502` whose detail says so,
+and the duplicate resolves itself at the next lookup (above). **Refused with
+`422`** naming `project`: a template, or an instance whose template is still
+live, because its siblings and template would stay behind. An instance whose
+repeating was stopped is already reported as plain (`parent: null`) and
+moves like any other task (verified: it imports and spawns nothing).
+`depends` is carried as-is; a dependency uuid the destination store cannot
+see reads as not blocked.
+
+**`GET /api/meta`** gains `"user": "<name>"` — who the server thinks is
+calling, so Settings can say so; **`null` in single-user mode**, which is how
+the client knows to hide Share / Make private — and `"shared": true|false` on each entry
+of `categories`. `categories` counts pending tasks across the caller's two
+stores; the shared ones are listed even with no task, from `categories.json`,
+because an empty shared category must survive being created. `projects` is
+the pa five (default user only; the other user is not offered them), then the
+caller's in-use categories, then the shared ones. `tags` is the union.
+
+**Shared categories.** `categories.json` in the shared store is
+`{"categories": ["groceries", …]}`, atomic writes like prefs. A category
+name means one thing on the box: it is either in that list, or it is private
+to whoever uses it. Two users may both have a private `work`; nobody may have
+a private category whose name is in the shared list, because the name would
+resolve to the shared one.
+
+- **`POST /api/categories/share`** `{"name"}` → `204`. Adds `name` to the
+  list and moves every non-deleted task of the caller's with that category
+  into the shared store (the same export/import/purge, bulk; recurring ones
+  are left behind and the response is still `204` — the count moved is in
+  the `X-Moved` header and the count left behind in `X-Left`, so the client
+  can say "3 moved, 1 recurring left private"; both are integer strings on
+  every `204`, zero included, and both are in CORS `expose_headers` beside
+  `ETag`, or the app at `capacitor://localhost` cannot read them). The name
+  goes into `categories.json` only after the move succeeds, so a share that
+  dies halfway is simply retried. `409 conflict` if another user has a non-deleted private task in
+  a category of that name: sharing would publish their tasks without asking
+  them. Already shared → `204`, nothing moved. Single-user mode → `409`
+  "no users configured".
+- **`POST /api/categories/unshare`** `{"name"}` → `204`. Moves every task in
+  that shared category into the **caller's** private store and removes the
+  name from the list and from every user's `prefs` (order, hidden, chips,
+  `widget.category`). Recurring tasks stay in the shared store and are
+  counted in `X-Left`. The other user loses sight of those tasks; it is a
+  household, and the alternative — splitting a category by who typed each
+  row — is the thing D19 rules out. Not shared → `204`, `X-Moved: 0`.
+- **`rename`** of a shared category runs in the shared store, renames it in
+  `categories.json` and in every user's prefs. Renaming a *private* category
+  **to a shared name**, or a shared one to a name any user holds privately,
+  is `409 conflict` — rename stays a rename; share/unshare is how a name
+  crosses the line.
+- **`delete`** of a shared category: `move_to` must be a shared category or
+  `null` (`422` naming `move_to` otherwise); tasks move inside the shared
+  store; every user's prefs are updated. Of a private one: unchanged, the
+  caller's prefs only — except that `move_to` naming a shared category is
+  `409 conflict`, the rename rule again.
+
+**Prefs are per user** (`GET`/`PUT /api/prefs`, `POST /api/widget/category`):
+the same document, the same validation, the caller's file. Order, hidden
+and chips may name shared categories; each user arranges them their own way.
+A non-default user's document **defaults to an empty `categories.order` and
+`chips.order`**: the five `pa` names in the class defaults are the default
+user's vocabulary, and walking them for her would put zero-count chips she
+never made on her screen.
+
+**The client.** A shared category is marked wherever a category is offered
+or shown — the picker in the sheet, the chip row, the section headers, the
+Settings → Categories list — so that choosing it is visibly choosing to
+publish the task. Settings → Categories gains **Share** / **Make private**
+beside Rename and Delete, confirm-first, naming the count that will move.
+Settings shows `meta.user`. An optimistic add into a shared category renders
+`shared: true` from the meta list before the server answers (D6). Nothing
+else in the client moves; the widget's Swift is untouched.
+
+**`/health`** is unchanged: `pending` counts the default store. Nothing
+here is reachable without passing the address allowlist first, as before.
+
+**Shipping.** Server: the env line plus `systemctl --user restart
+taskmaster-api`; **set the map before her phone installs**, or an unmapped
+phone is the default user and sees your list. Client: a bundle (D11). No
+native change. `pa` is untouched and does not read the shared store: no
+reminders and no `+claude` dispatch for shared tasks (D19, by choice).

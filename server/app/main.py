@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from . import stores
 from .config import settings
 from .errors import TaskFailed
 from .middleware import AccessControl
@@ -44,7 +45,10 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS", "PUT"],
     allow_headers=["Authorization", "Content-Type", "If-None-Match"],
-    expose_headers=["ETag"],
+    # X-Moved / X-Left: the counts share/unshare answer with (docs/api.md
+    # round 9). A cross-origin fetch from capacitor://localhost can read only
+    # the headers listed here, so without them the client sees neither.
+    expose_headers=["ETag", "X-Moved", "X-Left"],
 )
 app.add_middleware(AccessControl, settings=settings)
 
@@ -106,7 +110,17 @@ app.include_router(widget.router, prefix=settings.api_prefix)    # /api/widget
 # calls these, the native plugin does.
 app.include_router(app_update.router, prefix=settings.api_prefix)
 
+# Round 9 (docs/api.md, design.md D19): write any missing store directory and
+# taskrc now, so the first request from her phone does not meet a store
+# Taskwarrior has never seen. No-op in single-user mode.
+stores.ensure_all()
+
 log.info("taskmaster %s up: task=%s tz=%s auth=%s allow=%s bundles=%s",
          settings.version, settings.task_bin, settings.tz_name,
          "token" if settings.token else "none",
          ",".join(settings.allow_cidrs), settings.bundles_dir)
+if settings.users:
+    log.info("users: %s (default %s), stores in %s",
+             ", ".join("%s=%s" % (u.name, ",".join(map(str, u.addrs)))
+                       for u in settings.users),
+             settings.users[0].name, settings.stores_dir)

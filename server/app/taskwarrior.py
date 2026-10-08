@@ -30,6 +30,15 @@ against the user's real ~/.taskrc **with hooks on** — the on-add / on-modify
 hooks are what fire pa-pushnow, which reruns `pa retag` and republishes the
 Scriptable widget feed (docs/design.md D1). The tests point both at a throwaway
 directory with `hooks=off`.
+
+**Stores (docs/api.md round 9).** Every coroutine takes `store=`: None (or the
+ambient `stores.AMBIENT`) inherits the environment as above; any other store
+gets its own TASKRC/TASKDATA in the child's environment — the same mechanism
+the tests use — plus `rc.hooks=off` on the argv as belt and braces (3.4.2
+looks for hooks under TASKDATA, where there are none; stores.py). Still **one**
+lock across every store: the stores are separate SQLite files, but the lock
+also makes a cross-store move (export, import, delete, purge) the only thing
+running while each of its steps runs, and the calls are ~10 ms.
 """
 from __future__ import annotations
 
@@ -39,10 +48,13 @@ import logging
 import re
 import subprocess
 import threading
-from typing import Any, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
 from .config import settings
 from .errors import TaskFailed
+
+if TYPE_CHECKING:                       # stores.py imports nothing from here,
+    from .stores import Store           # but keep the runtime graph one-way
 
 log = logging.getLogger("taskmaster.task")
 
@@ -83,17 +95,26 @@ def is_uuid(value: str) -> bool:
 
 
 def _run(args: Sequence[str], verbose: str = "nothing",
-         extra_rc: Sequence[str] = ()) -> subprocess.CompletedProcess:
-    """Blocking. Holds the lock for the life of the child process."""
+         extra_rc: Sequence[str] = (), store: "Optional[Store]" = None,
+         stdin: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Blocking. Holds the lock for the life of the child process.
+
+    `stdin` is for `task import -`, which reads its JSON from standard input:
+    the document goes through a pipe, never through argv or a shell.
+    """
     rc = list(BASE_RC)
     if verbose != "nothing":
         rc[-1] = "rc.verbose=%s" % verbose
+    env = store.env() if store is not None else None
+    if env is not None:
+        rc.append("rc.hooks=off")
     rc += list(extra_rc)
     argv = [settings.task_bin, *rc, *args]
     with _LOCK:
         try:
             return subprocess.run(argv, capture_output=True, text=True,
-                                  timeout=settings.task_timeout_s)
+                                  timeout=settings.task_timeout_s, env=env,
+                                  input=stdin)
         except FileNotFoundError as exc:
             raise TaskFailed("cannot run %s: %s" % (settings.task_bin, exc), argv) from exc
         except subprocess.TimeoutExpired as exc:
@@ -118,8 +139,9 @@ def _check(res: subprocess.CompletedProcess, argv: Sequence[str]) -> str:
 
 
 async def _call(args: Sequence[str], verbose: str = "nothing",
-                extra_rc: Sequence[str] = ()) -> str:
-    res = await asyncio.to_thread(_run, args, verbose, extra_rc)
+                extra_rc: Sequence[str] = (), store=None,
+                stdin: Optional[str] = None) -> str:
+    res = await asyncio.to_thread(_run, args, verbose, extra_rc, store, stdin)
     return _check(res, args)
 
 
@@ -136,15 +158,15 @@ async def version() -> str:
     return _check(res, ["_version"]).strip()
 
 
-async def export(*filters: str) -> List[Dict[str, Any]]:
+async def export(*filters: str, store=None) -> List[Dict[str, Any]]:
     """Task dicts for a filter. `export()` with no filter is the whole DB."""
-    out = (await _call([*filters, "export"])).strip()
+    out = (await _call([*filters, "export"], store=store)).strip()
     if not out:
         return []
     return json.loads(out)
 
 
-async def get(uuid: str) -> Optional[Dict[str, Any]]:
+async def get(uuid: str, store=None) -> Optional[Dict[str, Any]]:
     """One task of any status, or None.
 
     Note `task <unknown-uuid> export` exits **0** with an empty array rather
@@ -152,11 +174,11 @@ async def get(uuid: str) -> Optional[Dict[str, Any]]:
     """
     if not is_uuid(uuid):
         return None
-    rows = await export(uuid)
+    rows = await export(uuid, store=store)
     return rows[0] if rows else None
 
 
-async def templates() -> Dict[str, Dict[str, Any]]:
+async def templates(store=None) -> Dict[str, Dict[str, Any]]:
     """uuid -> every live recurring template (`status:recurring`).
 
     The instances on the phone are pending tasks with a `parent`; their own
@@ -166,10 +188,10 @@ async def templates() -> Dict[str, Dict[str, Any]]:
     are what `serialize.task_out` reads the schedule out of — see its docstring
     for the two bugs that come of not doing this.
     """
-    return {t["uuid"]: t for t in await export("status:recurring")}
+    return {t["uuid"]: t for t in await export("status:recurring", store=store)}
 
 
-async def uda_order_declared() -> bool:
+async def uda_order_declared(store=None) -> bool:
     """Is `uda.order.type` set in the taskrc this server is running against?
 
     Worth a subprocess before every `order:` write, because the failure mode is
@@ -179,31 +201,33 @@ async def uda_order_declared() -> bool:
     Verified on 3.4.2. deploy/install.sh adds the two lines; this is what
     notices when it has not been run.
     """
-    res = await asyncio.to_thread(_run, ["_get", "rc.uda.order.type"])
+    res = await asyncio.to_thread(_run, ["_get", "rc.uda.order.type"],
+                                  "nothing", (), store)
     return bool(_check(res, ["_get"]).strip())
 
 
-async def blocked_uuids() -> set:
+async def blocked_uuids(store=None) -> set:
     """The uuids Taskwarrior itself considers blocked.
 
     `+BLOCKED` is Taskwarrior's virtual tag for "depends on something that is
     still pending" — exactly the `blocked` field in docs/api.md — so we let it
     do the transitive bookkeeping instead of re-deriving it from `depends`.
     """
-    return {t["uuid"] for t in await export("+BLOCKED")}
+    return {t["uuid"] for t in await export("+BLOCKED", store=store)}
 
 
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
-async def add(description: str, attrs: Sequence[str] = ()) -> str:
+async def add(description: str, attrs: Sequence[str] = (), store=None) -> str:
     """`task add <attrs…> -- <description>` -> the new uuid.
 
     `attrs` are already-validated `project:x` / `due:…` / `+tag` tokens. The
     description goes after `--` so `due:tomorrow` inside it stays literal
     (verified on 3.4.2).
     """
-    out = await _call(["add", *attrs, "--", description], verbose="new-uuid")
+    out = await _call(["add", *attrs, "--", description], verbose="new-uuid",
+                      store=store)
     m = _NEW_UUID_RE.search(out)
     if not m:
         raise TaskFailed("could not read the new uuid from %r" % out.strip(),
@@ -212,7 +236,7 @@ async def add(description: str, attrs: Sequence[str] = ()) -> str:
 
 
 async def modify(uuid: str, attrs: Sequence[str],
-                 description: Optional[str] = None) -> None:
+                 description: Optional[str] = None, store=None) -> None:
     """`task <uuid> modify <attrs…> [-- <description>]`.
 
     An empty value clears the attribute (`due:`, `project:`, `priority:`) and a
@@ -223,10 +247,11 @@ async def modify(uuid: str, attrs: Sequence[str],
     args = [uuid, "modify", *attrs]
     if description is not None:
         args += ["--", description]
-    await _call(args)
+    await _call(args, store=store)
 
 
-async def bulk_modify(filters: Sequence[str], attrs: Sequence[str]) -> int:
+async def bulk_modify(filters: Sequence[str], attrs: Sequence[str],
+                      store=None) -> int:
     """`task <filters…> modify <attrs…>` over many tasks. -> how many matched.
 
     Two things this has to get right, both verified on 3.4.2 and neither
@@ -243,26 +268,64 @@ async def bulk_modify(filters: Sequence[str], attrs: Sequence[str]) -> int:
       string. Renaming a category nobody has used yet is not an error, so the
       count is what decides whether there is anything to run.
     """
-    matched = await export(*filters)
+    matched = await export(*filters, store=store)
     if not matched:
         return 0
-    await _call([*filters, "modify", *attrs], extra_rc=["rc.bulk=0"])
+    await _call([*filters, "modify", *attrs], extra_rc=["rc.bulk=0"],
+                store=store)
     return len(matched)
 
 
-async def annotate(uuid: str, text: str) -> None:
-    await _call([uuid, "annotate", "--", text])
+async def annotate(uuid: str, text: str, store=None) -> None:
+    await _call([uuid, "annotate", "--", text], store=store)
 
 
-async def done(uuid: str) -> None:
-    await _call([uuid, "done"])
+async def done(uuid: str, store=None) -> None:
+    await _call([uuid, "done"], store=store)
 
 
-async def undone(uuid: str) -> None:
+async def undone(uuid: str, store=None) -> None:
     """Un-complete. `modify status:pending` clears `end` too (verified 3.4.2)."""
-    await _call([uuid, "modify", "status:pending"])
+    await _call([uuid, "modify", "status:pending"], store=store)
 
 
-async def delete(uuid: str) -> None:
+async def delete(uuid: str, store=None) -> None:
     """Taskwarrior keeps the record with status:deleted; it is not erased."""
-    await _call([uuid, "delete"])
+    await _call([uuid, "delete"], store=store)
+
+
+# --------------------------------------------------------------------------- #
+# Moving between stores (docs/api.md round 9, docs/design.md D19)
+# --------------------------------------------------------------------------- #
+async def purge(uuid: str, store=None) -> None:
+    """Erase a task's record outright. It must be `deleted` first.
+
+    Verified on 3.4.2 in a throwaway store: `task <uuid> purge` on a deleted
+    task exits 0 with rc.confirmation=off and the uuid then exports `[]` —
+    and on a *completed* task the `delete` before it also exits 0, so a
+    completed task can be moved too.
+    """
+    await _call([uuid, "purge"], store=store)
+
+
+async def import_tasks(rows: List[Dict[str, Any]], store=None) -> None:
+    """`task import -` with the export dicts on stdin.
+
+    Verified on 3.4.2: export from one store piped into `import -` in another
+    keeps the uuid, annotations (with their entry stamps), tags, due, `order`
+    and `depends` — including a dependency uuid the destination does not have
+    — and an orphan recurring instance imports without spawning anything.
+    `id` and `urgency` in the dicts are ignored by import. The JSON goes in
+    through a pipe: argv-only still holds, and there is no temp file to leak
+    a task description into /tmp.
+    """
+    if not rows:
+        return
+    await _call(["import", "-"], store=store, stdin=json.dumps(rows))
+
+
+async def remove(uuid: str, status: Optional[str], store=None) -> None:
+    """Delete (unless already deleted) then purge: no record left behind."""
+    if status != "deleted":
+        await delete(uuid, store=store)
+    await purge(uuid, store=store)

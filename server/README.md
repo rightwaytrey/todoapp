@@ -40,7 +40,7 @@ curl -s http://127.0.0.1:8101/health
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q          # 235 tests, ~10 s
+.venv/bin/python -m pytest -q          # 293 tests, ~20 s
 ```
 
 The suite drives the **real** `task` binary — nothing about Taskwarrior is
@@ -53,6 +53,12 @@ system temp dir and is not `~/.task` before a single command runs. `hooks=off`
 also keeps the suite from firing `pa-pushnow` (and so `task sync` and a widget
 republish) a hundred times in four seconds. The prefs file is a throwaway too,
 and is deleted between tests — the user's own category order is not a fixture.
+So is `TASKMASTER_STORES` (round 9): conftest points it at the temp dir and
+clears `TASKMASTER_USERS` unconditionally, so a shell that sourced
+`~/.config/taskmaster/env` cannot run the suite against
+`~/.local/share/taskmaster`. `tests/test_multi_user.py` turns on two users at
+fake tailnet addresses through the `two_users` fixture, which re-asserts the
+same rail on every store the server resolved before anything runs.
 
 Covered: create (including `due:tomorrow` inside a description staying literal,
 and shell metacharacters surviving intact), both `due` shapes round-tripping
@@ -186,6 +192,8 @@ bundle hands phones a default server their shell was not built for.
 | `TASKMASTER_BUNDLES_DIR` | `server/bundles/` | Where `scripts/publish_bundle.py` writes and `/api/app/update` reads. Publishing to a directory the API does not read is a bundle no phone can see. |
 | `TASKMASTER_BUNDLE_BASE` | *(unset — no default in code)* | The absolute base of the download URL handed to the phone. `TASKMASTER_PUBLIC_BASE` is accepted as the same thing. **Must name the same host as the `updateUrl` compiled into the shell** (`capacitor.config.ts`). Unset ⇒ every update check is answered `no bundle published` and a warning goes to the journal. |
 | `TASKMASTER_BUNDLE_APP_ID` | `org.rightwaytrey.taskmaster` | Only this app id gets answers. Empty disables the check. |
+| `TASKMASTER_USERS` | *(unset — single-user)* | `name=addr[,addr];name2=addr`. First entry is the default user. See "Two users" below. A malformed value **stops the service from starting** — on purpose. |
+| `TASKMASTER_STORES` | `~/.local/share/taskmaster` | Where the other users' stores and the shared store live. Only read when `TASKMASTER_USERS` is set. |
 | `TASKRC` / `TASKDATA` | *(the user's)* | Passed straight through to `task`. Production leaves them unset so the real `~/.taskrc` and its hooks are used. |
 
 ## Preferences, ordering, recurrence, categories, the widget feed
@@ -299,6 +307,63 @@ ones as history, plus a rewrite of the preferences (order, hidden, the
   silent data loss on the real database.
 * **`rc.bulk=0`.** `rc.confirmation=off` does not cover the bulk prompt: over
   five tasks the modify asks, reads EOF, and exits 1 having changed nothing.
+
+## Two users, a shared store (round 9)
+
+*The contract is `docs/api.md` "Two users, a shared store"; the reasoning is
+`docs/design.md` D19.*
+
+Off until one line goes into `~/.config/taskmaster/env`:
+
+```
+TASKMASTER_USERS="trey=100.64.x.a,100.64.x.b;partner=100.64.x.c"
+```
+
+then `systemctl --user restart taskmaster-api`. Names match
+`^[a-z][a-z0-9_]{0,15}$`, `shared` is reserved, and the addresses are each
+phone's (and desk's) tailnet IP. **The first entry is the default user**: their
+private store is the one the server has always used (`~/.task`, hooks on,
+`pa`), and their prefs stay at `$TASKMASTER_PREFS`. Loopback and every address
+not in the map are the default user too.
+
+> **Set the map before her phone installs.** An unmapped phone *is* the
+> default user and sees your whole list. The journal logs the map at startup
+> (`users: trey=…, partner=… (default trey)`), so check it there.
+
+The service refuses to start on a malformed map — a bad name, `shared`, an
+address that is not an IP, or one address under two names — because a lenient
+parse would silently make her phone an unmapped address.
+
+**Stores**, written at startup if missing:
+
+```
+$TASKMASTER_STORES/            (default ~/.local/share/taskmaster)
+  partner/taskrc, data/, prefs.json     one per non-default user
+  shared/taskrc, data/, categories.json
+```
+
+Each `taskrc` has `hooks=off`, no confirmations, recurrence on, and the
+`order` UDA. With `TASKDATA` set, 3.4.2 looks for hooks under that data
+directory, and these stores have none, so `pa-pushnow` never fires for them;
+`hooks=off` in the file and `rc.hooks=off` on every argv are belt and braces
+on top, so a stray `hooks/` dropped into a store directory still fires
+nothing. `TASKDATA` is passed to the child and wins over `data.location`.
+
+**How it works.** `app/stores.py` maps the client address to a user (in
+`middleware.py`, before routing, never from a header). Lists merge the
+caller's private store with the shared one; a uuid resolves private-first then
+shared, and another user's uuid is a `404`. The category decides the store: a
+create or a `PATCH` of `project` into a shared category goes to (or moves into)
+the shared store. A move is `export` → `import -` (the JSON on stdin) →
+`delete` → `purge`, which keeps the uuid, annotations, tags and `order` —
+verified on 3.4.2. If it dies after the import, the uuid is in both stores;
+the next lookup keeps the shared copy and purges the private one. Recurring
+tasks (a template, or an instance whose template is live) do not move.
+
+`POST /api/categories/share` / `unshare` answer `204` with `X-Moved` (tasks
+moved) and `X-Left` (recurring ones left where they were); both are in the
+CORS expose list. `pa` reads only `~/.task`: shared tasks get no reminders and
+no `+claude` dispatch, and the other user gets no `pa` at all (D19, by choice).
 
 ## App bundle updates (`docs/design.md` D11)
 
@@ -435,7 +500,10 @@ app/
                    due_label, the one implementation of docs/design.md D8
   schemas.py       pydantic v2 request bodies (unknown keys ignored)
   prefs.py         the preferences document: pydantic models, defaults, and
-                   the atomic read/write of prefs.json
+                   the atomic read/write of prefs.json (one file per user)
+  stores.py        who is calling (address -> user) and which Taskwarrior
+                   stores are theirs; categories.json (round 9)
+  moves.py         export -> import -> delete -> purge between stores
   middleware.py    the address allowlist + bearer token, pure ASGI
   routers/         health (unprefixed), meta, tasks, prefs, categories,
                    widget, app_update (the shell's live-update check and

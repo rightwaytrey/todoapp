@@ -52,6 +52,17 @@ assert REAL_TASKDATA not in DATA.parents, DATA
 
 PREFS = _TMP / "prefs.json"
 
+# Round 9's other stores (docs/api.md, design.md D19): every non-default
+# user's taskrc/data/prefs and the shared store live under TASKMASTER_STORES,
+# default ~/.local/share/taskmaster — real task data once her phone is on it.
+# Pointed here unconditionally, and TASKMASTER_USERS is cleared, so a shell
+# that sourced ~/.config/taskmaster/env cannot run the single-user suite in
+# multi-user mode against the real stores.
+STORES = _TMP / "stores"
+REAL_STORES = (Path.home() / ".local/share/taskmaster").resolve()
+assert STORES.is_relative_to(Path(tempfile.gettempdir()).resolve()), STORES
+assert STORES != REAL_STORES and REAL_STORES not in STORES.parents, STORES
+
 os.environ["TASKRC"] = str(RC)
 os.environ["TASKDATA"] = str(DATA)
 os.environ["TASKMASTER_TZ"] = "America/Chicago"
@@ -59,6 +70,8 @@ os.environ["TASKMASTER_TZ"] = "America/Chicago"
 # ~/.config/taskmaster/prefs.json and a test that wrote it would rearrange the
 # user's own category order.
 os.environ["TASKMASTER_PREFS"] = str(PREFS)
+os.environ["TASKMASTER_STORES"] = str(STORES)
+os.environ.pop("TASKMASTER_USERS", None)
 os.environ.pop("TASKMASTER_TOKEN", None)
 os.environ.pop("TASKMASTER_ALLOW_CIDRS", None)
 
@@ -75,6 +88,8 @@ from app.config import reload_settings, settings                 # noqa: E402
 assert os.environ["TASKDATA"] == str(DATA)
 
 assert settings.prefs_path == PREFS, settings.prefs_path
+assert settings.stores_dir == STORES, settings.stores_dir
+assert settings.users == [], settings.users
 
 TASK = settings.task_bin
 
@@ -98,6 +113,7 @@ def clean_db():
     # No prefs file: every test starts from the documented defaults, the same
     # state a freshly installed box is in.
     PREFS.unlink(missing_ok=True)
+    shutil.rmtree(STORES, ignore_errors=True)
     reload_settings()
     yield
 
@@ -135,3 +151,51 @@ async def listing(c: AsyncClient, status: str = "pending") -> list:
     r = await c.get("/api/tasks", params={"status": status})
     assert r.status_code == 200, r.text
     return r.json()
+
+
+# --- two users (docs/api.md round 9) ---------------------------------------
+# Example addresses inside 100.64.0.0/10, not this tailnet's real ones (the
+# repo is public — see test_access.py).
+TREY_ADDR = "100.64.0.10"
+PARTNER_ADDR = "100.64.0.20"
+STRANGER_ADDR = "100.64.0.99"          # on the tailnet, not in the map
+
+
+@pytest.fixture
+def two_users(monkeypatch):
+    """Multi-user mode: `trey` (default, the conftest store) and `partner`.
+
+    The rail is re-checked against what the server actually resolved, after
+    the reload — the stores it will write are under the temp dir and are
+    neither ~/.task nor ~/.local/share/taskmaster.
+    """
+    from app import stores
+
+    monkeypatch.setenv("TASKMASTER_USERS", "trey=%s;partner=%s"
+                       % (TREY_ADDR, PARTNER_ADDR))
+    monkeypatch.setenv("TASKMASTER_STORES", str(STORES))
+    reload_settings()
+    assert settings.stores_dir == STORES
+    for u in stores.users():
+        if u.store.root is not None:
+            assert u.store.root.is_relative_to(_TMP), u.store.root
+            assert REAL_TASKDATA not in u.store.root.parents
+            assert u.prefs_path.is_relative_to(_TMP), u.prefs_path
+    shared = stores.shared_store()
+    assert shared.root.is_relative_to(_TMP), shared.root
+    stores.ensure_all()
+    yield
+    monkeypatch.delenv("TASKMASTER_USERS")
+    reload_settings()
+
+
+def store_task(store: str, *args: str) -> subprocess.CompletedProcess:
+    """`task` against one of the round-9 stores under STORES (never ~/.task)."""
+    root = STORES / store
+    assert root.is_relative_to(_TMP), root
+    env = dict(os.environ, TASKRC=str(root / "taskrc"),
+               TASKDATA=str(root / "data"))
+    return subprocess.run(
+        [TASK, "rc.confirmation=off", "rc.recurrence.confirmation=off",
+         "rc.context=none", "rc.verbose=nothing", "rc.hooks=off", *args],
+        capture_output=True, text=True, check=False, env=env)

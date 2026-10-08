@@ -297,6 +297,22 @@ class CategoryDelete(BaseModel):
         return clean_project(v)
 
 
+class CategoryName(BaseModel):
+    """`{"name"}` — POST /api/categories/share and /unshare (round 9)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def v_name(cls, v):
+        name = clean_project(v)
+        if name is None:
+            raise ValueError("must match ^[A-Za-z0-9_.-]{1,40}$")
+        return name
+
+
 # --------------------------------------------------------------------------- #
 # Widget (docs/api.md round 8: POST /api/widget/category)
 # --------------------------------------------------------------------------- #

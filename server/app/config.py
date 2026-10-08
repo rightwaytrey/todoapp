@@ -19,7 +19,9 @@ import ipaddress
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional
+import re
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("taskmaster.config")
@@ -50,6 +52,73 @@ def _s(name: str, default: str = "") -> str:
 
 def _list(name: str) -> List[str]:
     return [p.strip() for p in os.environ.get(name, "").split(",") if p.strip()]
+
+
+# --- Users (docs/api.md round 9, docs/design.md D19) -----------------------
+USER_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
+
+# The shared store's directory name, so no user may be called it.
+SHARED = "shared"
+
+
+@dataclass(frozen=True)
+class UserSpec:
+    """One `name=addr[,addr…]` entry of TASKMASTER_USERS, parsed.
+
+    Only the parse lives here; what a user *owns* (a store, a prefs file) is
+    app/stores.py's business, so this module stays "read the environment".
+    """
+    name: str
+    addrs: Tuple[ipaddress._BaseAddress, ...]
+    default: bool
+
+
+def parse_users(raw: str) -> List[UserSpec]:
+    """`TASKMASTER_USERS` -> specs, first entry the default user. Raises ValueError.
+
+    **Fails loudly, on purpose.** Every other variable in this module falls
+    back to a working default; this one cannot. An entry dropped for a typo
+    makes that phone an *unmapped* address, and an unmapped address is the
+    default user (docs/api.md round 9) — so a lenient parse turns "her name
+    was misspelt" into "her phone shows your whole list". A service that
+    refuses to start says so in the journal instead.
+    """
+    specs: List[UserSpec] = []
+    seen_addrs = {}
+    for entry in (e.strip() for e in raw.split(";")):
+        if not entry:
+            continue
+        name, sep, addrs = entry.partition("=")
+        name = name.strip()
+        if not sep:
+            raise ValueError("TASKMASTER_USERS entry %r is not name=addr[,addr]" % entry)
+        if not USER_NAME_RE.match(name):
+            raise ValueError("TASKMASTER_USERS name %r must match %s"
+                             % (name, USER_NAME_RE.pattern))
+        if name == SHARED:
+            raise ValueError("TASKMASTER_USERS: %r is reserved for the shared store"
+                             % SHARED)
+        if any(s.name == name for s in specs):
+            raise ValueError("TASKMASTER_USERS names %r twice" % name)
+        parsed = []
+        for a in (a.strip() for a in addrs.split(",")):
+            if not a:
+                continue
+            try:
+                ip = ipaddress.ip_address(a)
+            except ValueError:
+                raise ValueError("TASKMASTER_USERS: %r (for %s) is not an IP address"
+                                 % (a, name)) from None
+            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+                ip = ip.ipv4_mapped
+            if ip in seen_addrs:
+                # Two owners for one address: whichever won would be a guess.
+                raise ValueError("TASKMASTER_USERS: %s is mapped to both %s and %s"
+                                 % (ip, seen_addrs[ip], name))
+            seen_addrs[ip] = name
+            parsed.append(ip)
+        specs.append(UserSpec(name, tuple(parsed), default=not specs))
+    return specs
 
 
 def _task_bin() -> str:
@@ -109,6 +178,18 @@ class Settings:
         # public (D4).
         self.prefs_path = Path(
             _s("TASKMASTER_PREFS") or "~/.config/taskmaster/prefs.json"
+        ).expanduser()
+
+        # --- Users and stores (docs/api.md round 9, docs/design.md D19) -----
+        # Unset (or empty) => no users, no shared store: single-user, exactly
+        # as before round 9. The first entry is the default user, who owns the
+        # ambient TASKRC/TASKDATA (~/.task, hooks and all) and `prefs_path`.
+        self.users: List[UserSpec] = parse_users(_s("TASKMASTER_USERS"))
+        # Where every OTHER store lives: <name>/{taskrc,data,prefs.json} per
+        # non-default user, shared/{taskrc,data,categories.json}. Outside the
+        # repo (it is task data) and outside ~/.task (whose hooks are pa's).
+        self.stores_dir = Path(
+            _s("TASKMASTER_STORES") or "~/.local/share/taskmaster"
         ).expanduser()
 
         # --- App bundle updates (docs/design.md D11, docs/api.md) -----------

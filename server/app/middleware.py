@@ -19,6 +19,7 @@ import json
 import logging
 from typing import Optional
 
+from . import stores
 from .config import Settings
 
 log = logging.getLogger("taskmaster.access")
@@ -106,6 +107,14 @@ class AccessControl:
             if not self._bearer_ok(scope, token):
                 return await self._reject(send, 401, "unauthorized",
                                           "Missing or wrong bearer token.")
+
+        # Round 9 (docs/api.md, design.md D19): the address that just passed
+        # the allowlist also says whose list this is. Decided here, once,
+        # before routing — never from a header, which anything on the tailnet
+        # could set. Routes read it back through stores.caller(request).
+        # `scope["state"]` is what Starlette's request.state wraps; uvicorn
+        # hands each request its own copy, so writing to it is per-request.
+        scope.setdefault("state", {})["tm_user"] = stores.resolve(host)
 
         return await self.app(scope, receive, send)
 

@@ -233,6 +233,11 @@
   .fchip.on { background: var(--accent); color: var(--accent-text); border-color: transparent; }
   .fchip .fn { font-variant-numeric: tabular-nums; font-weight: 750; opacity: .85; }
   .fchip .h { opacity: .55; font-weight: 700; }   /* the # on a tag chip */
+  /* The shared-category mark (api.md round 9, D19): the same " · shared" text
+     everywhere a category is shown, so it is plain text inside a native
+     <select> too. It inherits the colour it sits in -- dim on a section head,
+     accent-text on a selected chip -- so it reads in either theme. */
+  .shmark { font-weight: 600; opacity: .75; white-space: nowrap; }
 
   /* ---- task rows ------------------------------------------------------- */
   .list {
@@ -754,6 +759,11 @@
     <button class="btn" id="setTest">Test connection</button>
   </div>
   <div class="banner" id="setTestOut" hidden></div>
+  <!-- meta.user (api.md round 9): decided by this phone's tailnet address,
+       not by anything typed here, so it is shown rather than edited. -->
+  <div class="kv" style="margin-top:10px">
+    <div><b>Signed in as</b><span id="setUser">—</span></div>
+  </div>
 
   <!-- Everything from here to "This device" is one document on the SERVER
        (GET/PUT /api/prefs, docs/api.md). It is deliberately not part of the
@@ -1552,7 +1562,13 @@ function project() {
     if (op.kind === 'add') {
       if (findIn(pend, op.uuid) === -1 && findIn(dn, op.uuid) === -1) pend.push(op.task);
     } else if (op.kind === 'patch') {
-      patchInPlace(op.uuid, op.body);
+      // A category change across the line moves the task between stores
+      // (api.md round 9); show where it is going, not where it was, until the
+      // server's Task -- whose `shared` wins -- comes back. Projection only:
+      // there is no `shared` on the wire's Update.
+      patchInPlace(op.uuid, 'project' in op.body
+        ? Object.assign({}, op.body, { shared: isSharedCat(op.body.project) })
+        : op.body);
     } else if (op.kind === 'done') {
       const t = take(op.uuid);
       if (t) { t.status = 'completed'; t.end = op.at; dn.unshift(t); }
@@ -1774,7 +1790,8 @@ function req(path, opts) {
         throw mkErr(r.status, (j && (j.detail || j.error)) || ('HTTP ' + r.status),
                     j && j.error);
       }
-      return { status: r.status, data: j, etag: r.headers.get('ETag') || '' };
+      return { status: r.status, data: j, etag: r.headers.get('ETag') || '',
+               moved: r.headers.get('X-Moved') };
     });
   }, err => {
     // fetch rejects with a TypeError when the request never left (DNS, no
@@ -1935,12 +1952,22 @@ const NEEDS_CONN = 'That needs a connection to the server — preferences are ' 
 // they are ordinary server calls and not part of the prefs document.
 async function categoryCall(path, body, okMsg) {
   if (!store.base) { toast(NEEDS_CONN, { bad: true }); return false; }
+  let res;
   try {
-    await req(path, { method: 'POST', body: body });
+    res = await req(path, { method: 'POST', body: body });
   } catch (err) {
-    toast(err.status === 0 ? NEEDS_CONN : ('Could not save: ' + err.detail),
-          { bad: true });
+    // A 409 (round 9: a name crossing the shared/private line, or someone
+    // else's tasks under it) is a sentence from the server -- say it as is.
+    toast(err.status === 0 ? NEEDS_CONN
+          : err.status === 409 ? err.detail
+          : ('Could not save: ' + err.detail), { bad: true });
     return false;
+  }
+  // Share/unshare say how many tasks moved in X-Moved (api.md round 9); a
+  // function okMsg is handed that count, or null when it is absent/unexposed.
+  if (typeof okMsg === 'function') {
+    const m = parseInt(res && res.moved, 10);
+    okMsg = okMsg(isNaN(m) ? null : m);
   }
   // Every category on screen has just moved, so the list, the meta and the
   // prefs are all stale at once.
@@ -2008,7 +2035,11 @@ function tagChips(tags) {
 function metaLine(t, opts) {
   opts = opts || {};
   const bits = [];
-  if (t.project) bits.push('<span>' + esc(t.project) + '</span>');
+  // The row's own `shared` (which store it lives in, api.md round 9) when
+  // there is one; an older cached row falls back to the category's flag.
+  if (t.project) bits.push('<span>' + esc(t.project) +
+    sharedMarkHTML(typeof t.shared === 'boolean' ? t.shared : isSharedCat(t.project)) +
+    '</span>');
   // The Done tab hides the due entirely: a finished task shown in red because
   // it was late is noise, and next to the completion time two clock values on
   // one row read as a contradiction.
@@ -2142,7 +2173,8 @@ function renderFilterBar(all) {
     const on = c[0] === filter;
     return '<button class="fchip' + (on ? ' on' : '') + '" data-f="' + esc(c[0]) + '"' +
       ' aria-pressed="' + (on ? 'true' : 'false') + '">' +
-      '<span>' + (c[3] ? '<span class="h">#</span>' : '') + esc(c[1]) + '</span>' +
+      '<span>' + (c[3] ? '<span class="h">#</span>' : '') + esc(c[1]) +
+        sharedMarkHTML(!c[3] && isSharedCat(c[1])) + '</span>' +
       (on ? '<span class="fn">' + esc(c[2]) + '</span>' : '') +
       '</button>';
   }).join('');
@@ -2300,7 +2332,8 @@ function renderCategorySections(rows, view) {
     const list = buckets[name];
     const head = '<h2 class="group cathead">' +
       (name ? catSecDragHandle(name) : '') +
-      '<span class="catname">' + esc(name || 'No category') + '</span>' +
+      '<span class="catname">' + esc(name || 'No category') +
+        sharedMarkHTML(isSharedCat(name)) + '</span>' +
       '<span class="n">' + list.length + '</span></h2>';
     const body = '<div class="list">' +
       list.map(t => taskRow(t, { waiting: !!view.pendingIds[t.uuid],
@@ -2408,6 +2441,10 @@ function render() {
 
 function renderSettings(view) {
   paintBuildInfo();
+  // Who the server thinks is calling (api.md round 9). Only while it is
+  // answering: offline, the cached name is a guess about a server not heard.
+  $('setUser').textContent = (store.base && netState !== 'offline' &&
+                              typeof meta.user === 'string' && meta.user) || '—';
   $('setLastSync').textContent = lastSync ? fmtStamp(lastSync) : 'never';
   $('setCounts').textContent = (view.pend.length + ' pending · ' +
                                 view.done.length + ' done');
@@ -2520,19 +2557,27 @@ function renderCatEditor() {
       'No categories yet.</span></div>');
     return;
   }
+  const sharing = typeof meta.user === 'string';
   setHTML('catEditor', names.map(name => {
     const hidden = isHiddenCat(name);
+    const shared = isSharedCat(name);
     const n = catCount(name);
     const note = n + (n === 1 ? ' task' : ' tasks') + (hidden ? ' · hidden' : '');
     return '<div class="prefrow' + (hidden ? ' off' : '') + '" data-cat="' +
       esc(name) + '">' +
       catDragHandle(name) +
-      '<span class="pname">' + esc(name) +
+      '<span class="pname">' + esc(name) + sharedMarkHTML(shared) +
         '<span class="pnote">' + esc(note) + '</span></span>' +
       '<span class="pacts">' +
         miniBtn(hidden ? 'Show' : 'Hide', 'hide', name,
                 (hidden ? 'Show ' : 'Hide ') + name) +
         miniBtn('Rename', 'rename', name, 'Rename ' + name) +
+        // Share / Make private (api.md round 9) only against a server that
+        // speaks round 9 -- `user` in meta is the sign; an older one would
+        // answer 404 to a button that should not have been offered.
+        (sharing ? (shared
+          ? miniBtn('Make private', 'unshare', name, 'Make ' + name + ' private')
+          : miniBtn('Share', 'share', name, 'Share ' + name)) : '') +
         miniBtn('Delete', 'delete', name, 'Delete ' + name, { cls: 'danger' }) +
       '</span></div>';
   }).join(''));
@@ -2555,6 +2600,27 @@ function catEditorAct(act, name) {
   }
   if (act === 'rename') { renameCategory(name); return; }
   if (act === 'delete') { deleteCategory(name); return; }
+  if (act === 'share' || act === 'unshare') { shareCategory(name, act === 'share'); return; }
+}
+
+// Share / Make private (api.md round 9, design.md D19): a bulk move between
+// the caller's store and the shared one, so confirm-first like Rename and
+// Delete, naming what moves. The count is meta's (pending, across both of the
+// caller's stores); the server's X-Moved header is what actually moved --
+// recurring tasks stay behind -- so the toast says that number, not this one.
+function shareCategory(name, share) {
+  const n = catCount(name);
+  const tasks = n + ' pending task' + (n === 1 ? '' : 's');
+  if (!window.confirm(share
+      ? ('Share "' + name + '"?\n\n' + tasks + ' will move to the shared ' +
+         'list, and anything added to it will be seen by everyone on this server.')
+      : ('Make "' + name + '" private?\n\n' + tasks + ' will move to your own ' +
+         'list. Nobody else will see them any more.'))) return;
+  categoryCall(share ? '/api/categories/share' : '/api/categories/unshare',
+               { name: name },
+               moved => (share ? 'Shared ' + name : 'Made ' + name + ' private') +
+                        (moved === null ? '' : ' · ' + moved + ' moved')
+  ).then(ok => { if (ok) render(); });
 }
 
 function renameCategory(name) {
@@ -2586,7 +2652,7 @@ function deleteCategory(name) {
     hint: 'Deleting "' + name + '". Its ' + n + ' task' + (n === 1 ? '' : 's') +
           ' stay — pick where they go.',
     current: '__none__',
-    rows: [['', 'No category']].concat(others.map(c => [c, c])),
+    rows: [['', 'No category']].concat(others.map(c => [c, catLabel(c)])),
     onPick: v => {
       closeCatPicker();
       const where = v ? ('moved to "' + v + '"') : 'left with no category';
@@ -3389,6 +3455,29 @@ function allCategories() {
   return out;
 }
 
+// ---- shared categories (api.md round 9, design.md D19) --------------------
+// The category IS the sharing decision, so whether a name is shared is read
+// from meta.categories[].shared and nowhere else. Derived once per meta
+// object (loadMeta() replaces it wholesale), not on every row drawn.
+let sharedCatMeta = null, sharedCatSet = Object.create(null);
+function isSharedCat(name) {
+  if (sharedCatMeta !== meta) {
+    sharedCatMeta = meta;
+    sharedCatSet = Object.create(null);
+    for (const c of (Array.isArray(meta.categories) ? meta.categories : [])) {
+      if (c && c.shared === true) sharedCatSet[c.name] = true;
+    }
+  }
+  return !!(name && sharedCatSet[name]);
+}
+// ONE mark, everywhere a category is offered or shown. Plain text, because
+// the sheet's pickers are native <select>s and an <option> holds no markup.
+const SHARED_MARK = ' · shared';
+function catLabel(name) { return name + (isSharedCat(name) ? SHARED_MARK : ''); }
+function sharedMarkHTML(on) {
+  return on ? '<span class="shmark">' + esc(SHARED_MARK) + '</span>' : '';
+}
+
 function categoryList(extra) {
   const out = [];
   const v = project();
@@ -3490,7 +3579,7 @@ function openSheet(uuid) {
   $('shProject').innerHTML =
     '<option value="">— none —</option>' +
     categoryList(t.project).map(p => '<option value="' + esc(p) + '"' +
-      (p === t.project ? ' selected' : '') + '>' + esc(p) + '</option>').join('') +
+      (p === t.project ? ' selected' : '') + '>' + esc(catLabel(p)) + '</option>').join('') +
     '<option value="__new__">New category…</option>';
   $('shNewProject').hidden = true;
   $('shNewProject').value = '';
@@ -3545,7 +3634,7 @@ function openNewTaskSheet() {
   $('shProject').innerHTML =
     '<option value="">— none —</option>' +
     categoryList(cat).map(p => '<option value="' + esc(p) + '"' +
-      (p === cat ? ' selected' : '') + '>' + esc(p) + '</option>').join('') +
+      (p === cat ? ' selected' : '') + '>' + esc(catLabel(p)) + '</option>').join('') +
     '<option value="__new__">New category…</option>';
   $('shNewProject').hidden = true;
   $('shNewProject').value = '';
@@ -3777,7 +3866,11 @@ function sheetSaveNew() {
     priority: priority, due: due, due_at: null, tags: shTags.slice(),
     annotations: [], recur: null, parent: null, depends: [], blocked: false,
     urgency: 5, entry: new Date().toISOString(), modified: new Date().toISOString(),
-    end: null
+    end: null,
+    // D6 / api.md round 9: the store is decided by the category, so the
+    // local row can say "shared" before the server does; mergeServerTask()
+    // replaces it with the server's own `shared` when the add lands.
+    shared: isSharedCat(project)
   };
   flashRow(uuid);
   enqueue({ kind: 'add', uuid: uuid, body: body, task: task });

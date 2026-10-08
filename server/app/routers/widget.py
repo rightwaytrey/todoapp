@@ -27,9 +27,10 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Request, Response
 
 from .. import prefs as store
+from .. import stores
 from .. import taskwarrior as tw
 from ..schemas import WidgetCategorySet
 from ..serialize import (display_sort, due_label, local_now, now_iso, one_line,
@@ -96,14 +97,29 @@ def category_chips(order: List[str], hidden: List[str], active: Optional[str],
 
 
 @router.get("/widget")
-async def widget_feed():
-    prefs = store.load()
+async def widget_feed(request: Request):
+    # Round 9: the caller's own prefs over the caller's private store merged
+    # with the shared one — her widget is her list because her phone's
+    # address is (design.md D19). The widget's Swift is untouched; rows carry
+    # no `shared` flag because it draws nothing with one.
+    user = stores.caller(request)
+    prefs = store.load(user.prefs_path)
     wp = prefs.widget
 
-    raw = await tw.export("status:pending")
-    templates = await tw.templates() if any(r.get("parent") for r in raw) else {}
     now = local_now()
-    tasks = [task_out(r, set(), templates, now) for r in raw]
+    tasks = []
+    seen = set()
+    shared = stores.shared_store()
+    # Shared first, so a uuid caught mid-move (in both stores) is drawn once,
+    # as its shared copy — the answer routers/tasks.py `_locate` gives.
+    for st in ([shared] if shared else []) + [user.store]:
+        raw = [r for r in await tw.export("status:pending", store=st)
+               if r["uuid"] not in seen]
+        seen.update(r["uuid"] for r in raw)
+        templates = (await tw.templates(store=st)
+                     if any(r.get("parent") for r in raw) else {})
+        tasks += [task_out(r, set(), templates, now, shared=st.shared)
+                  for r in raw]
 
     groups = set(wp.groups)
     # The upcoming window is a DATE comparison, like everything else that
@@ -179,7 +195,7 @@ async def widget_feed():
 
 
 @router.post("/widget/category", status_code=204)
-async def set_widget_category(body: WidgetCategorySet):
+async def set_widget_category(request: Request, body: WidgetCategorySet):
     """`{"category": string|null}` → 204 (docs/api.md round 8).
 
     One intent, one write — not a GET-then-PUT of the whole `/api/prefs`
@@ -192,6 +208,7 @@ async def set_widget_category(body: WidgetCategorySet):
     `categories` write landing between this read and that write is not
     clobbered.
     """
-    widget = store.load().widget.model_copy(update={"category": body.category})
-    store.update(widget=widget.model_dump())
+    path = stores.caller(request).prefs_path          # her widget, her file
+    widget = store.load(path).widget.model_copy(update={"category": body.category})
+    store.update(path, widget=widget.model_dump())
     return Response(status_code=204)

@@ -616,13 +616,94 @@ as before. Pure chrome: the box's extra height is charged by raising a
 header's cost from 3 to 4 of a row's 5 units, in Swift only; the feed and
 the server are unchanged.
 
+## D19 — Two people: a private store each, one shared store, and the category is the sharing unit
+
+*Added 2026-10-08, from "let's think about multiple users and how we can
+share tasks and categories between users" → "private plus shared, her phone
+is on the tailnet".*
+
+The second user's phone is on the tailnet and runs the same TestFlight
+build. Each person has **private tasks the other never sees**, and some
+categories are **shared**: a task is shared because of the category it is
+in, and for no other reason. Nothing else about the app changes for either
+of you — one list, grouped; capture through the +; the widget.
+
+**Three stores, not one with an owner field.** Your tasks stay in `~/.task`
+exactly as they are, hooks and all; she gets a second Taskwarrior data
+directory of her own; and a third, `shared`, holds the shared categories.
+The server picks the stores by who is calling, exports the caller's private
+store and the shared one, and merges them into the one list (api.md round
+9). The deciding reason is D1: `pa` roundup, digest, remind, retag, the
+`+claude` queue and the Scriptable feed all read `~/.task` and treat every
+pending task as yours. With one store and an `owner` field, every one of
+those would need an owner filter, and the first one missed puts "buy Trey a
+present" in your morning digest and your `task next`. With a store each,
+privacy is a property of the filesystem, and `pa` is untouched by
+construction — with `TASKDATA` set, 3.4.2 looks for hooks under that data
+directory (verified with `rc.debug.hooks=1`), there are none in the other two
+stores, and their taskrcs say `hooks=off` besides, so `pa-pushnow` never
+fires for them.
+
+**The category is the sharing unit** because that is what a category already
+is (D13: one name saying where a task belongs). A shared category lives in
+the shared store, a task put in it is published, and a task moved out of it
+is private again. There is no per-task "shared" switch: a second
+where-does-this-go field is the two-overlapping-buckets confusion D13 exists
+to avoid, and "it's in Groceries, so she can see it" is a rule that can be
+said in one breath. Share / Make private are bulk actions beside Rename and
+Delete under Settings → Categories, and the shared mark on a category shows
+everywhere a category does.
+
+**A move keeps the uuid.** Verified on 3.4.2 before this was written, in a
+throwaway pair of stores (never the real one): `task export` → `task import`
+into the other store keeps uuid, annotations, tags and `order`;
+`delete` + `purge` leaves no trace in the source; the uuid can come back
+later. So a category change that crosses the boundary is an ordinary PATCH
+from the phone's point of view, and the optimistic row never has to be
+re-keyed. Recurring tasks do not cross — their template and siblings would
+stay behind — and are left where they are with a message.
+
+**Identity is the tailnet address, not a token.** The widget sends no
+`Authorization` header and the updater cannot send one (D11), so a per-user
+token would leave the home screen anonymous. D4 already trusts the address as
+the gate; now it also says whose list it is. The map is one line in the env
+file outside the repo, the first entry is you, and an unmapped address — the
+desk's `curl`, a phone not yet added — is you, which is exactly today's
+behaviour until the line exists. **The line goes in before her phone
+installs.** With the variable unset the server is single-user, byte for byte.
+
+**Prefs are per user** (D15, one layer out): her order of categories, her
+chips, her widget — including how she arranges the shared categories. One
+document per person; the shared store carries only the list of shared names.
+
+**`pa` reads only your store, and that is fine.** The digest is off
+(checked 2026-10-08: the user timers are remind, retag, claude, med and
+tasksync — no digest, no roundup). `pa remind` and the `+claude` queue read
+`~/.task`, so a shared task does not ping and `+claude` on it dispatches
+nothing; she gets no `pa` at all. Nothing is planned here: the user, asked,
+said to forget about it. If it is ever wanted, the change is additive — `pa`
+reads one more `TASKDATA` — and nothing in this app moves.
+
+**Ruled out:** an `owner` UDA in one store (above); TaskChampion sync between
+stores (it replicates a whole store to replicas, it cannot share part of
+one); a bearer token per user (the widget and the updater); `tailscale whois`
+on the source address (needs the tailscaled socket the service user does not
+have — `sudo -n -l` lists no tailscale — and a static map is one line);
+splitting a category on unshare by who typed each task (nothing records
+that, and a category that is half-shared is a filter nobody can explain).
+
+Server and client change; no native change, so a bundle (D11) plus the env
+line and `systemctl --user restart`. The widget's Swift is untouched: her
+widget is her list because her phone's address is.
+
 ## Out of scope for v1 (build together later)
 
 ~~Recurrence editing (recurring templates are managed upstream in `pa`)~~ —
 **built 2026-09-04**, server-side: `PATCH` takes `recur`/`until` and routes them
 to the template (docs/api.md Recurrence, which also records what Taskwarrior
 3.4.2 will and will not let go of). Dependencies (shown as "blocked", not
-editable), push notifications, Android, multi-user.
+editable), push notifications, Android, ~~multi-user~~ — **decided
+2026-10-08, D19**; see api.md round 9.
 
 ~~a native widget (the Scriptable one keeps working unchanged)~~ — **built
 2026-09-04, see D7.** The Scriptable widget does still work unchanged, and

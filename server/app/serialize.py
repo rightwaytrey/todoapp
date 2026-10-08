@@ -321,7 +321,8 @@ def order_out(raw: Dict[str, Any]) -> Optional[float]:
 
 def task_out(raw: Dict[str, Any], blocked: Optional[set] = None,
              templates: Optional[Dict[str, Dict[str, Any]]] = None,
-             now: Optional[datetime] = None) -> Dict[str, Any]:
+             now: Optional[datetime] = None,
+             shared: bool = False) -> Dict[str, Any]:
     """One export dict -> one Task (docs/api.md "The Task object").
 
     `templates` maps uuid -> the live `status:recurring` template, and it is
@@ -389,6 +390,10 @@ def task_out(raw: Dict[str, Any], blocked: Optional[set] = None,
         "entry": iso(raw.get("entry")),
         "modified": iso(raw.get("modified")),
         "end": iso(raw.get("end")),
+        # Which store the row lives in (docs/api.md round 9). Always present,
+        # `false` in single-user mode, so the client has one Task shape. Not a
+        # field on Create/Update: the category is the sharing decision (D19).
+        "shared": shared,
     }
 
 
