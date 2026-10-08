@@ -206,6 +206,63 @@ async def test_recurring_templates_never_reach_the_widget(client):
 
 
 # --------------------------------------------------------------------------- #
+# One row per recurring series (round 10)
+# --------------------------------------------------------------------------- #
+ALL_GROUPS = {"groups": ["overdue", "today", "upcoming", "none"],
+              "upcoming_days": 7}
+
+
+async def test_taskwarrior_keeps_tomorrows_instance_pending_too(client):
+    """The premise, pinned: 3.4.2 on `recurrence.limit=1` spawns the NEXT
+    instance alongside the current one, so `/api/tasks` (uncollapsed, D2)
+    lists a daily task twice from the moment it is created."""
+    t = await make(client, "feed cats", due=day(0))
+    await client.patch("/api/tasks/%s" % t["uuid"], json={"recur": "daily"})
+    r = await client.get("/api/tasks", params={"status": "pending"})
+    dues = sorted(x["due"][:10] for x in r.json() if x["description"] == "feed cats")
+    assert dues == [day(0), day(1)]
+
+
+async def test_a_daily_task_is_one_widget_row_even_with_upcoming_on(client):
+    await put_prefs(client, widget=ALL_GROUPS)
+    t = await make(client, "feed cats", due=day(0))
+    await client.patch("/api/tasks/%s" % t["uuid"], json={"recur": "daily"})
+    await make(client, "dentist", due=day(1))            # a plain upcoming task
+    rows = (await feed(client))["rows"]
+    assert [(r["text"], r["due"]) for r in rows] == [("feed cats", "today"),
+                                                     ("dentist", "Tomorrow")]
+
+
+async def test_a_slipped_series_shows_its_overdue_instance_only(client):
+    await put_prefs(client, widget=ALL_GROUPS)
+    t = await make(client, "water plants", due=day(-1))
+    await client.patch("/api/tasks/%s" % t["uuid"], json={"recur": "daily"})
+    rows = (await feed(client))["rows"]
+    assert [(r["text"], r["due"], r["overdue"]) for r in rows] == \
+        [("water plants", "overdue", True)]
+
+
+async def test_completing_the_shown_instance_reveals_the_next(client):
+    await put_prefs(client, widget=ALL_GROUPS)
+    t = await make(client, "feed cats", due=day(0))
+    await client.patch("/api/tasks/%s" % t["uuid"], json={"recur": "daily"})
+    shown = (await feed(client))["rows"][0]
+    assert shown["due"] == "today"
+    r = await client.post("/api/tasks/%s/done" % shown["uuid"])
+    assert r.status_code == 200, r.text
+    rows = (await feed(client))["rows"]
+    assert [(r["text"], r["due"]) for r in rows] == [("feed cats", "Tomorrow")]
+    assert rows[0]["uuid"] != shown["uuid"]
+
+
+async def test_total_counts_the_collapsed_series_once(client):
+    await put_prefs(client, widget=ALL_GROUPS)
+    t = await make(client, "feed cats", due=day(0))
+    await client.patch("/api/tasks/%s" % t["uuid"], json={"recur": "daily"})
+    assert (await feed(client))["total"] == 1
+
+
+# --------------------------------------------------------------------------- #
 # group_by — "due" (round 5) or "category" (round 6)
 # --------------------------------------------------------------------------- #
 async def test_due_mode_is_byte_for_byte_what_round_5_sent(client):

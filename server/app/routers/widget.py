@@ -21,6 +21,12 @@ feed (`category`, the active filter; `categories`, the chips to offer) and
 `POST /api/widget/category` to set the filter in one call. Same reasoning as
 round 6 — the widget must not fetch `/api/prefs` just to draw its own picker,
 and a WidgetKit intent gets one shot at the network, not a read then a write.
+
+Round 10 (2026-10-08) draws a recurring series **once**: Taskwarrior keeps
+tomorrow's instance pending next to today's (`recurrence.limit=1` generates
+one instance *ahead*, verified on 3.4.2), and with `upcoming` on the widget
+showed a daily chore twice. `one_per_series()` keeps the earliest pending
+instance of each template and drops the rest.
 """
 from __future__ import annotations
 
@@ -64,6 +70,31 @@ def category_key(order: List[str]) -> Callable[[Dict[str, Any]], Tuple]:
         return (1, (category.lower(), category))
 
     return key
+
+
+def one_per_series(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop every recurring instance but the earliest pending one per template.
+
+    Taskwarrior 3.4.2 with the default `recurrence.limit=1` keeps one instance
+    *ahead* of the current one, so a daily task due today also has tomorrow's
+    pending, and one that slipped has yesterday's, today's and tomorrow's. On
+    the widget "feed cats" is one chore, not a column of three: a series is
+    drawn as its earliest pending instance (the overdue one until it is done,
+    then today's, then tomorrow's once today's is ticked). Plain tasks and
+    orphans (`parent` cleared because the template is gone, `task_out()`)
+    are untouched. `/api/tasks` is NOT collapsed — every pending task is on
+    the Tasks screen (design.md D2).
+    """
+    earliest: Dict[str, Dict[str, Any]] = {}
+    for t in tasks:
+        parent = t.get("parent")
+        if not parent:
+            continue
+        held = earliest.get(parent)
+        if held is None or (t.get("due") or "") < (held.get("due") or ""):
+            earliest[parent] = t
+    return [t for t in tasks
+            if not t.get("parent") or earliest[t["parent"]] is t]
 
 
 def category_chips(order: List[str], hidden: List[str], active: Optional[str],
@@ -120,6 +151,7 @@ async def widget_feed(request: Request):
                      if any(r.get("parent") for r in raw) else {})
         tasks += [task_out(r, set(), templates, now, shared=st.shared)
                   for r in raw]
+    tasks = one_per_series(tasks)
 
     groups = set(wp.groups)
     # The upcoming window is a DATE comparison, like everything else that

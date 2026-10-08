@@ -351,8 +351,9 @@ async def _apply_recurrence(uuid: str, body: TaskPatch, sent: set,
                             ) -> Optional[Dict[str, Any]]:
     """Route `recur` / `until` to whichever task actually owns the schedule.
 
-    Taskwarrior's model is a `status:recurring` **template** plus one pending
-    **instance** at a time (`recurrence.limit=1`). The phone only ever sees
+    Taskwarrior's model is a `status:recurring` **template** plus its pending
+    **instances** — the current one and, on `recurrence.limit=1`, the next
+    (verified on 3.4.2, docs/api.md round 10). The phone only ever sees
     instances, so a "make this repeat weekly" tap arrives on the wrong task and
     this is where it is redirected. Returns the spawned instance when a plain
     task was promoted into a template, otherwise None.

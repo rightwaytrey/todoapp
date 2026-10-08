@@ -1,7 +1,8 @@
 """PATCH recur / until, against the real Taskwarrior 3.4.2.
 
-Taskwarrior's recurrence model is a `status:recurring` **template** plus one
-pending **instance** at a time (`recurrence.limit=1`). The phone only ever sees
+Taskwarrior's recurrence model is a `status:recurring` **template** plus its
+pending **instances** — the current one and, on `recurrence.limit=1`, the next
+(verified on 3.4.2, docs/api.md round 10). The phone only ever sees
 instances, so every one of these endpoints is really "find the task that owns
 the schedule and write there instead".
 

@@ -449,8 +449,12 @@ in the tests:
   deleted (`task <parent> delete`, confirmation off) and the current instance is
   kept as a plain task (~~`modify parent: recur: imask:` as far as Taskwarrior
   allows~~ — see below; the answer is "none of it"). ~~Other pending instances
-  of that template are deleted with the template.~~ — they are not, and on
-  `recurrence.limit=1` there is only ever one.
+  of that template are deleted with the template.~~ — they are not, and
+  ~~on `recurrence.limit=1` there is only ever one~~ — there are **two**:
+  3.4.2 keeps the *next* instance pending beside the current one (verified
+  2026-10-08, pinned by `test_taskwarrior_keeps_tomorrows_instance_pending_too`),
+  and a series that has slipped a day has three. `/api/tasks` lists them all;
+  only the widget feed collapses them (round 10, below).
 
 > **Server's findings on Taskwarrior 3.4.2, 2026-09-04.** All of this was run
 > against the real binary in a throwaway data dir and is pinned by
@@ -595,6 +599,16 @@ Labels in full, matching the client's `dueLabel()`: `""` (no due), `"overdue"`,
 `"Tomorrow"` / `"Tomorrow · 2:30 pm"`, `"Thu Sep 10"` (date-only, weekday
 carried), `"Sep 12 · 2:30 pm"` (clocked, weekday dropped so the row stays one
 line), and `"Sat Jan 2, 2027"` once the year differs.
+
+**One row per recurring series (2026-10-08, round 10).** Taskwarrior keeps
+tomorrow's instance of a daily task pending next to today's (see the
+Recurrence note), so with `upcoming` enabled the widget drew "feed cats"
+twice, and three times once it had slipped a day. The feed now keeps only the
+**earliest pending instance** of each template (`parent`) and drops the rest
+before the group/horizon/category filters run, so `total` counts the series
+once. Completing the shown instance reveals the next. Plain tasks and
+orphaned instances (template deleted) are unaffected, and `/api/tasks` is
+**not** collapsed — every pending task stays on the Tasks screen.
 
 ### Widget grouping by category (2026-09-04, round 6)
 
