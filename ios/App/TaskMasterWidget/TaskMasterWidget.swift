@@ -346,6 +346,10 @@ private func capsFrom(_ f: FeedCaps?) -> RowCaps {
 /// is shared with the server and changing it is an api.md change, not this file's.
 private let kRowUnits = 5     // a row is 5 units
 private let kHeaderUnits = 3  // a 16 pt header against a 26 pt row is ~0.6 of a row, not 0.5
+/// A header when the runs are BOXED (All chip lit, grouped by category): the
+/// same 16 pt, plus the box's kBoxBelow inside and the kBoxGap between boxes —
+/// 20 pt, ~3.8 of a row's 5 units. Client chrome only: the server never sees it.
+private let kBoxedHeaderUnits = 4
 
 /// How many rows this family can afford, given the category of each row in the
 /// order they will be drawn.
@@ -362,7 +366,8 @@ private let kHeaderUnits = 3  // a 16 pt header against a 26 pt row is ~0.6 of a
 /// guarantees a header is never drawn with nothing under it: a header is only
 /// ever paid for as part of the row that follows it, so the two are taken
 /// together or not at all.
-private func groupedRowCount(_ categories: [String], cap: Int, fits: Int) -> Int {
+private func groupedRowCount(_ categories: [String], cap: Int, fits: Int,
+                             headerUnits: Int = kHeaderUnits) -> Int {
     let budget: Int = fits * kRowUnits
     var spent: Int = 0
     var taken: Int = 0
@@ -373,7 +378,7 @@ private func groupedRowCount(_ categories: [String], cap: Int, fits: Int) -> Int
 
     for category in categories {
         if taken >= cap { break }
-        let cost: Int = kRowUnits + (lastCategory == category ? 0 : kHeaderUnits)
+        let cost: Int = kRowUnits + (lastCategory == category ? 0 : headerUnits)
         if spent + cost > budget { break }
         spent += cost
         taken += 1
@@ -438,6 +443,13 @@ private enum TodayItem: Identifiable {
     }
 }
 
+/// One boxed run: its header and the rows under it. The id is the header's,
+/// which is already unique per run.
+private struct TodayRun: Identifiable {
+    let id: String
+    var items: [TodayItem]
+}
+
 /// What the header over a run says. The server sends "" for "no category", and
 /// the header still has to name the run — a blank one would read as a gap in the
 /// list. Drawn through .textCase(.uppercase), so on screen it is "NO CATEGORY".
@@ -452,7 +464,8 @@ private func categoryTitle(_ category: String) -> String {
 /// — and it is written as its own branch rather than as a special case of the
 /// walk so that a feed without `group_by` cannot possibly draw differently than
 /// it did before any of this existed.
-private func layoutItems(rows: [TodayRow], grouped: Bool, cap: Int, fits: Int) -> [TodayItem] {
+private func layoutItems(rows: [TodayRow], grouped: Bool, cap: Int, fits: Int,
+                         headerUnits: Int = kHeaderUnits) -> [TodayItem] {
     guard grouped else {
         var flat: [TodayItem] = []
         for row in rows.prefix(min(cap, fits)) { flat.append(TodayItem.row(row)) }
@@ -463,7 +476,7 @@ private func layoutItems(rows: [TodayRow], grouped: Bool, cap: Int, fits: Int) -
     // nothing else: the budget is arithmetic over a list of strings, and is
     // testable as such.
     let categories: [String] = rows.map { (row: TodayRow) -> String in row.category }
-    let take: Int = groupedRowCount(categories, cap: cap, fits: fits)
+    let take: Int = groupedRowCount(categories, cap: cap, fits: fits, headerUnits: headerUnits)
 
     var items: [TodayItem] = []
     var lastCategory: String? = nil
@@ -971,6 +984,14 @@ private let kHeaderSize: CGFloat = 10
 private let kHeaderAbove: CGFloat = 4
 private let kHeaderBelow: CGFloat = 2
 
+/// The box around one category run when "All" is lit: the room under its last
+/// row inside the outline, and the gap between one box and the next. The box's
+/// top is the header's own kHeaderAbove. Charged in kBoxedHeaderUnits.
+private let kBoxBelow: CGFloat = 2
+private let kBoxGap: CGFloat = 2
+private let kBoxInset: CGFloat = 6
+private let kBoxRadius: CGFloat = 8
+
 /// The header's "+" glyph. Its own constant for the same reason kSymbolSize
 /// is one: "about 17 pt" is a specific claim, not a value shared with
 /// anything else already in the file.
@@ -1232,6 +1253,40 @@ struct TaskMasterWidgetView: View {
         }
     }
 
+    /// Whether each category run is drawn inside its own small box: grouped by
+    /// category, and the "All" chip is the one lit. With a single category
+    /// chosen the list is one run, and a box around everything says nothing.
+    private var boxesRuns: Bool {
+        return entry.groupByCategory && (entry.chipCategory ?? "").isEmpty
+    }
+
+    /// The items cut into runs, each starting at its header. layoutItems() only
+    /// ever puts a header first and never draws one with nothing under it, so
+    /// every run is a header and at least one row.
+    private func runs(_ items: [TodayItem]) -> [TodayRun] {
+        var out: [TodayRun] = []
+        for item in items {
+            if case .header = item { out.append(TodayRun(id: item.id, items: [])) }
+            if out.isEmpty { out.append(TodayRun(id: item.id, items: [])) }
+            out[out.count - 1].items.append(item)
+        }
+        return out
+    }
+
+    /// One run in its box: a thin rounded outline, the header and rows inset
+    /// inside it.
+    private func boxBody(_ run: TodayRun) -> some View {
+        return VStack(alignment: .leading, spacing: 0) {
+            ForEach(run.items) { item in
+                itemBody(item)
+            }
+        }
+        .padding(.horizontal, kBoxInset)
+        .padding(.bottom, kBoxBelow)
+        .background(RoundedRectangle(cornerRadius: kBoxRadius)
+                        .stroke(Color.gray.opacity(0.35), lineWidth: 1))
+    }
+
     /// The list: the rows this family can afford, their headers, and "+N more".
     ///
     /// Its own property, with plain statements before a single `return`, so that
@@ -1243,7 +1298,8 @@ struct TaskMasterWidgetView: View {
         let items: [TodayItem] = layoutItems(rows: entry.rows,
                                              grouped: entry.groupByCategory,
                                              cap: entry.caps.cap(for: family),
-                                             fits: fits)
+                                             fits: fits,
+                                             headerUnits: boxesRuns ? kBoxedHeaderUnits : kHeaderUnits)
 
         // Headers are not tasks. "+N more" is still `total` — everything that
         // qualified server-side — less the ROWS on screen.
@@ -1258,8 +1314,16 @@ struct TaskMasterWidgetView: View {
         // target leaves around the 18 pt glyph is already wider than the gap the
         // old spacing drew. The header's own padding is what separates the runs.
         return VStack(alignment: .leading, spacing: 0) {
-            ForEach(items) { item in
-                itemBody(item)
+            if boxesRuns {
+                VStack(alignment: .leading, spacing: kBoxGap) {
+                    ForEach(runs(items)) { run in
+                        boxBody(run)
+                    }
+                }
+            } else {
+                ForEach(items) { item in
+                    itemBody(item)
+                }
             }
             if more > 0 {
                 Text("+" + String(more) + " more")

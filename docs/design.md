@@ -608,6 +608,14 @@ configuration intents still stands. It stays possible later.
 fit are dropped from the end, never the active one. Widget change → a build
 on the VM runner; the server half is a restart.
 
+**Boxed runs under All** *(2026-10-08, "small boxes around categories of
+tasks when all is selected")*: grouped by category with the All chip lit,
+each category run — its header and its rows — is drawn inside a thin rounded
+outline. With one category chosen the list is a single run and draws flat,
+as before. Pure chrome: the box's extra height is charged by raising a
+header's cost from 3 to 4 of a row's 5 units, in Swift only; the feed and
+the server are unchanged.
+
 ## Out of scope for v1 (build together later)
 
 ~~Recurrence editing (recurring templates are managed upstream in `pa`)~~ —

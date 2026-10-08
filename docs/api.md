@@ -606,7 +606,9 @@ category in the normal display order; every row carries `category` regardless
 of `show_category`. The widget draws a small header before the first row of
 each category run (no-category rows get the header "No category") and counts
 each header as roughly half a row against the family's cap. With `"due"`
-nothing changes from round 5.
+nothing changes from round 5. (Client-side only: with the All chip lit the widget also
+draws each run in a small outlined box and charges its header a little more
+— design.md D18. Nothing on the wire changes.)
 
 ### List grouping by category (2026-09-14, round 7)
 
